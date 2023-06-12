@@ -181,7 +181,6 @@ case class CarbonVerifier(override val reporter: Reporter,
     val (tProg, translatedNames) = mainModule.translate(program, reporter)
     _translated = tProg
 
-
     val options = {
       if (config == null) {
         Nil
@@ -232,7 +231,7 @@ case class CarbonVerifier(override val reporter: Reporter,
 
         result match {
           case Failure(errors) if transformNames => {
-            errors.foreach(e =>  BoogieModelTransformer.transformCounterexample(e, translatedNames))
+            errors.foreach(e =>  BoogieModelTransformer.transformCounterexample(e, translatedNames, program, wandModule.lazyWandToShapes))
           }
           case _ => result
         }
