@@ -2,41 +2,132 @@ package viper.carbon.boogie
 
 import viper.carbon.boogie.IntermediateCounterexampleModel.transformModelEntries
 
-import scala.collection.mutable
+import scala.collection.{Seq, mutable}
 import util.control.Breaks._
 import viper.carbon.verifier.FailureContextImpl
 import viper.silver.ast
-import viper.silver.ast.Literal
-import viper.silver.verifier.{AbstractError, ApplicationEntry, ConstantEntry, MapEntry, Model, ModelEntry, SimpleCounterexample, UnspecifiedEntry, VerificationError}
+import viper.silver.ast.{Literal, Member}
+import viper.silver.verifier.{AbstractError, ApplicationEntry, ConstantEntry, FailureContext, MapEntry, Model, ModelEntry, SimpleCounterexample, UnspecifiedEntry, VerificationError}
 import viper.silver.ast.{AbstractLocalVar, Declaration, LocalVar, MagicWandStructure, Program, Type}
 
-class Counterexample {
-  val store = Seq[(AbstractLocalVar, CEValue)]()
+case class CounterexampleGenerator(e: AbstractError, names: Map[String, Map[String, String]], program: Program, wandNames: Option[Map[MagicWandStructure.MagicWandStructure, Func]]) {
+  val ve = e.asInstanceOf[VerificationError]
+  val errorMethod = ErrorMemberMapping.mapping.get(ve.methodIdentifier).get
+  val imCE = IntermediateCounterexampleModel(ve, errorMethod, names, program, wandNames)
+  println(imCE.toString)
+
+  val store = CounterexampleGenerator.detStore(program.methodsByName.get(errorMethod.name).get.scopedDecls, imCE.basicVariables, imCE.allCollections)
   //val heaps = Seq[Seq[(Declaration, HeapInstance)]]
   val domains = null
+  //val out = findCorrespondingStoreValue(imCE.basicVariables, imCE.allCollections)
+
+  override def toString: String = {
+    var finalString = "      Final Counterexampel: \n"
+    finalString ++= "   Store: \n"
+    for (in <- store.storeEntries)
+      finalString ++= (in.toString ++ "\n")
+    finalString ++= "   Old Heap: \n"
+//    for (in <- allHeapInstances(0).basicHeapEntries)
+//      finalString ++= (in.toString ++ "\n")
+//    finalString ++= "Return Heap: \n"
+//    for (in <- allHeapInstances(allHeapInstances.length - 1).basicHeapEntries)
+//      finalString ++= (in.toString ++ "\n")
+    finalString ++= "   Domains: \n"
+    finalString
+  }
 }
 
-sealed trait CEValue
+case class IntermediateCounterexampleModel(ve: VerificationError, errorMethod: Member, names: Map[String, Map[String, String]], program: Program, wandNames: Option[Map[MagicWandStructure.MagicWandStructure, Func]]) {
+  val originalEntries = ve.failureContexts(0).counterExample.get.model
+  //println(originalEntries.entries.toString())
+  val typenamesInMethod = names.get(errorMethod.name).get.map(e => e._2 -> e._1)
+  val methodVarDecl = program.methodsByName.get(errorMethod.name).get.scopedDecls
 
-case class CEVariable(name: String, value: ModelEntry, typ: Option[Type]) extends CEValue {
-  override lazy val toString = s"Variable Name: ${name}, Value: ${value.toString}, Type: ${typ.toString()}"
+  val basicVariables = IntermediateCounterexampleModel.detCEvariables(originalEntries.entries, typenamesInMethod, methodVarDecl)
+  val allSequences = IntermediateCounterexampleModel.detSequences(originalEntries)
+  val allSets = IntermediateCounterexampleModel.detSets(originalEntries)
+  val allCollections = allSequences ++ allSets
+
+  val workingModel = IntermediateCounterexampleModel.buildNewModel(originalEntries.entries)
+  val hmStates = IntermediateCounterexampleModel.oldAndReturnHeapMask(workingModel)
+  val allHeapInstances = IntermediateCounterexampleModel.detHeapTypes(workingModel, hmStates)
+
+
+
+  override def toString: String = {
+    var finalString = "      Intermediate Counterexampel: \n"
+    finalString ++= "   Store: \n"
+    for (in <- basicVariables)
+      finalString ++= (in.toString ++ "\n")
+    for (in <- allCollections)
+      finalString ++= (in.toString ++ "\n")
+    finalString ++= "   Old Heap: \n"
+    if (allHeapInstances.length > 0) {
+      for (in <- allHeapInstances(0).basicHeapEntries)
+        finalString ++= (in.toString ++ "\n")
+      finalString ++= "   Return Heap: \n"
+      for (in <- allHeapInstances(allHeapInstances.length - 1).basicHeapEntries)
+        finalString ++= (in.toString ++ "\n")
+    }
+    finalString ++= "   Domains: \n"
+    finalString
+  }
+}
+
+case class StoreCounterexample(storeEntries: Seq[StoreEntry]) {
+
+}
+case class StoreEntry(id: AbstractLocalVar, entry: CEValue) {
+  override lazy val toString = s"Variable Name: ${id.name}, Value: ${entry.value}, Type: ${id.typ.toString}"
+}
+sealed trait CEValue {
+  val id : String
+  val value : Any
+  val valueType : Option[ast.Type]
+}
+
+case class CEVariable(name: String, entryValue: ModelEntry, typ: Option[Type]) extends CEValue {
+  val id = name
+  val value = entryValue
+  val valueType = typ
+  override lazy val toString = s"Variable Name: ${name}, Value: ${value.toString}, Type: ${typ.getOrElse("None").toString}"
 }
 
 case class CESequence(name: String, sequence: Seq[String], memberTypes: Option[Type]) extends CEValue {
+  val id = name
+  val value = sequence
+  val valueType = memberTypes
   override lazy val toString = s"Sequence: $name --> $sequence, Type: Seq($memberTypes)"
 }
 
 case class CESet(name: String, set: Set[String], memberTypes: Option[Type]) extends CEValue {
+  val id = name
+  val value = set
+  val valueType = memberTypes
   override lazy val toString = s"Set: $name --> $set, Type: Set($memberTypes)"
 }
 
-case class CEMultiset(name: String, set: Set[String], memberTypes: Option[Type]) extends CEValue {
-  override lazy val toString = s"Multiset: $name --> $set, Type: Multiset($memberTypes)"
+case class CEMultiset(name: String, multiset: Set[String], memberTypes: Option[Type]) extends CEValue {
+  val id = name
+  val value = multiset
+  val valueType = memberTypes
+  override lazy val toString = s"Multiset: $name --> $multiset, Type: Multiset($memberTypes)"
 }
 
-case class BasicHeap(basicHeapEntries: Set[BasicHeapEntry])
+case class BasicHeap(basicHeapEntries: Set[BasicHeapEntry]) {
+  var finalString = ""
+  basicHeapEntries.foreach{case x => finalString ++= (x.toString ++ "\n")}
+  override lazy val toString = finalString
+}
 
-case class BasicHeapEntry(reference: String, fields: Seq[String], valueID: String, perm: Option[Literal])
+case class BasicHeapEntry(reference: String, field: String, valueID: String, perm: Option[IntLit], typ: String) {
+  override lazy val toString = s"Basic heap entry: $reference + $field --> (Value: $valueID, Permission: ${perm.getOrElse("None")})"
+}
+
+
+
+
+
 
 case class EvaluatedHeap(finalHeapEntries: Set[FinalHeapEntry])
 
@@ -45,72 +136,22 @@ sealed trait FinalHeapEntry
 case class FieldAccess(reference: String, fields: Seq[String], valueID: String, perm: Option[Literal])
 
 
-
-case class IntermediateCounterexampleModel(e: AbstractError, names: Map[String, Map[String, String]], program: Program, wandNames: Option[Map[MagicWandStructure.MagicWandStructure, Func]]) {
-  val ve = e.asInstanceOf[VerificationError]
-  val errorMethod = ErrorMemberMapping.mapping.get(ve.methodIdentifier).get
-  val originalEntries = ve.failureContexts(0).counterExample.get.model
-  val typenamesInMethod = names.get(errorMethod.name).get.map(e => e._2 -> e._1)
-  val methodVarDecl = program.methodsByName.get(errorMethod.name).get.scopedDecls
-
-  val basicVariables = IntermediateCounterexampleModel.detCEvariables(originalEntries.entries, typenamesInMethod)
-  val allSequences = IntermediateCounterexampleModel.detSequences(originalEntries)
-  val allSets = IntermediateCounterexampleModel.detSets(originalEntries)
-  val allCollections = allSequences ++ allSets
-  //lazy val store = null
-
-  val workingModel = IntermediateCounterexampleModel.buildNewModel(originalEntries.entries)
-  val hmStates = IntermediateCounterexampleModel.oldAndReturnHeapMask(workingModel)
-  val allHeapInstances = IntermediateCounterexampleModel.detHeapTypes(workingModel, hmStates)
-
-  override def toString: String = {
-    var finalString = "     Intermediate Counterexampel: \n"
-    finalString ++= "Store: \n"
-    for (in <- basicVariables)
-      finalString ++= (in.toString ++ "\n")
-    for (in <- allCollections)
-      finalString ++= (in.toString ++ "\n")
-    finalString
-  }
-}
-
-
 object IntermediateCounterexampleModel {
 
-//  def detBasicVariables(originalEntries: Map[String, ModelEntry], namesInMember: Map[String, String], methodVariables: Seq[Declaration]): Seq[CEVariable] = {
-//    var res = Seq[CEVariable]()
-//    val modelVariables = transformModelEntries(originalEntries, namesInMember)
-//    for (decl <- methodVariables) {
-//      println(decl.toString)
-//      println(decl.getClass)
-//      if (decl.isInstanceOf[AbstractLocalVar]) {
-//        val alvDecl = decl.asInstanceOf[AbstractLocalVar]
-//        modelVariables.get(alvDecl.toString) match {
-//          case Some(x) =>
-//            var varTyp: Option[Type] = None
-//            if (decl.isInstanceOf[LocalVar]) {
-//              varTyp = Some(x.asInstanceOf[LocalVar].typ)
-//            }
-//            if (x.isInstanceOf[ConstantEntry]) {
-//              res +:= CEVariable(alvDecl, x, varTyp)
-//            } else if (x.isInstanceOf[ApplicationEntry]) {
-//              res +:= CEVariable(alvDecl, x, varTyp)
-//            } else {
-//              println(s"Couldn't find a ConstantEntry or ApplicationEntry for the Variable: ${alvDecl.name}")
-//            }
-//          case None => println(s"Couldn't find an entry for the Variable: ${alvDecl.name}")
-//        }
-//      }
-//    }
-//    res
-//  }
-
-  def detCEvariables(originalEntries: Map[String, ModelEntry], namesInMember: Map[String, String]): Seq[CEVariable] = {
+  def detCEvariables(originalEntries: Map[String, ModelEntry], namesInMember: Map[String, String], variables: Seq[Declaration]): Seq[CEVariable] = {
     var res = Seq[CEVariable]()
     val modelVariables = transformModelEntries(originalEntries, namesInMember)
     for ((name, entry) <- modelVariables) {
-      //val entryType = detEntryType()
-      res +:= CEVariable(name, entry, None)
+      for (temp <- variables) {
+        val v = temp.asInstanceOf[ast.LocalVarDecl]
+        if (v.name == name) {
+          var ent = entry
+          if (entry.isInstanceOf[MapEntry]) {
+            ent = entry.asInstanceOf[MapEntry].options.head._1(0)
+          }
+          res +:= CEVariable(v.name, ent, Some(v.typ))
+        }
+      }
     }
     res
   }
@@ -154,8 +195,17 @@ object IntermediateCounterexampleModel {
     }
   }
 
+  def boogieTypeToSilverType(inType: viper.carbon.boogie.Type): Option[ast.Type] = {
+    inType match {
+      case Int => Some(ast.Int)
+      case Bool => Some(ast.Bool)
+      case Real => Some(ast.TypeVar("Real"))
+      case _ => None
+    }
+  }
+
   // a CE generator for sequences
-  def detSequences(model: Model): Set[CESequence] = {
+  def detSequences(model: Model): Set[CEValue] = {
     var res = Map[String, Seq[String]]()
     var tempMap = Map[(String, Seq[String]), String]()
     for ((opName, opValues) <- model.entries) {
@@ -234,7 +284,7 @@ object IntermediateCounterexampleModel {
         }
       }
     }
-    var ans = Set[CESequence]()
+    var ans = Set[CEValue]()
     res.foreach {
       case (n, s) =>
         val typ: Option[Type] = detASTTypeFromString(n.replaceAll(".*?<(.*)>.*", "$1")) match {
@@ -247,7 +297,7 @@ object IntermediateCounterexampleModel {
   }
 
   // a CE generator for sets
-  def detSets(model: Model): Set[CESet] = {
+  def detSets(model: Model): Set[CEValue] = {
     var res = Map[String, Set[String]]()
     for ((opName, opValues) <- model.entries) {
       if (opName == "Set#Empty") {
@@ -312,7 +362,7 @@ object IntermediateCounterexampleModel {
         }
       }
     }
-    var ans = Set[CESet]()
+    var ans = Set[CEValue]()
     res.foreach {
       case (n, s) =>
         val typ: Option[Type] = detASTTypeFromString(n.replaceAll(".*?<(.*)>.*", "$1")) match {
@@ -417,7 +467,7 @@ object IntermediateCounterexampleModel {
     filteredList
   }
 
-  def detHeapTypes(opMapping: Map[Seq[String], String], hmStates: List[(String, String, String, String)]): Seq[Set[(String, String, String, String)]] = {
+  def detHeapTypes(opMapping: Map[Seq[String], String], hmStates: List[(String, String, String, String)]): Seq[BasicHeap] = {
     var permMap = Map[String, String]()
     var heapOp = Map[Seq[String], String]()
     var maskOp = Map[Seq[String], String]()
@@ -431,27 +481,27 @@ object IntermediateCounterexampleModel {
       }
     }
 
-    var res = Seq[Set[(String, String, String, String)]]()
+    var res = Seq[Set[BasicHeapEntry]]()
     for (heapInstance <- 0 to hmStates.length-1) {
-      var retSet = Set[(String, String, String, String)]()
+      var retSet = Set[BasicHeapEntry]()
       for ((_, _, heapIdentifier, maskIdentifier) <- hmStates.slice(0, heapInstance).reverse) {
         for ((maskKey, perm) <- maskOp) {
           val maskId = maskKey(1)
           val reference = maskKey(2)
           val field = maskKey(3)
           if (maskId == maskIdentifier) {
-            if (!retSet.exists({ case (s1, s2, _, _) => (s1 == reference) && (s2 == field) })) {
+            if (!retSet.exists({ case bhe => (bhe.reference == reference) && (bhe.field == field) })) {
               heapOp.get(Seq("MapType0Select", heapIdentifier, reference, field)) match {
-                case Some(v) => retSet += ((reference, field, v, permMap.get(perm).get))
-                case None => retSet += ((reference, field, "#undefined", permMap.get(perm).get))
+                case Some(v) => retSet += BasicHeapEntry(reference, field, v, Some(IntLit(BigInt(permMap.get(perm).get.toFloat.toInt))), "not defined")
+                case None => retSet += BasicHeapEntry(reference, field, "#undefined", Some(IntLit(BigInt(permMap.get(perm).get.toFloat.toInt))), "not defined")
               }
             } else {
-              retSet.find({ case (s1, s2, s3, _) => (s1 == reference) && (s2 == field) && (s3 == "#undefined") }) match {
+              retSet.find({ case bhe => (bhe.reference == reference) && (bhe.field == field) && (bhe.valueID == "#undefined") }) match {
                 case Some(v) =>
                   heapOp.get(Seq("MapType0Select", heapIdentifier, reference, field)) match {
                     case Some(x) =>
-                      retSet += ((reference, field, x, v._4))
-                      retSet -= ((reference, field, "#undefined", v._4))
+                      retSet += BasicHeapEntry(reference, field, x, v.perm, "not defined")
+                      retSet -= BasicHeapEntry(reference, field, "#undefined", v.perm, "not defined")
                     case None => //
                   }
                 case None => //
@@ -463,27 +513,10 @@ object IntermediateCounterexampleModel {
       res +:= retSet
     }
 
-//    var oldSet = Set[(String, String, String, String)]()
-//    for ((maskKey, perm) <- maskOp) {
-//      val maskId = maskKey(1)
-//      val reference = maskKey(2)
-//      val field = maskKey(3)
-//      if (maskId == oldMask) {
-//        heapOp.get(Seq("MapType0Select", oldHeap, reference, field)) match {
-//          case Some(v) =>
-//            oldSet += ((reference, field, v, permMap.get(perm).get))
-//          case None =>
-//            oldSet += ((reference, field, "#undefined", permMap.get(perm).get))
-//        }
-//      }
-//    }
-
-    res
+    var ans = Seq[BasicHeap]()
+    res.foreach{ case x => ans +:= BasicHeap(x)}
+    ans
   }
-
-
-
-
 
   // "replaceEntriesModel" choose all the operations for specific type supported in the CE
   def findAllFuncOper(workingModel: Map[Seq[String], String], program: Program): Map[Seq[String], String] = {
@@ -503,6 +536,30 @@ object IntermediateCounterexampleModel {
 
 }
 
+object CounterexampleGenerator {
+  def detStore(store: Seq[Declaration], variables: Seq[CEVariable], collections: Set[CEValue]): StoreCounterexample = {
+    var ans = Seq[StoreEntry]()
+    for (k <- store) {
+      val v = k.asInstanceOf[ast.LocalVarDecl]
+      for (vari <- variables) {
+        if (v.name == vari.name) {
+          var found = false
+          for (coll <- collections) {
+            if (vari.entryValue.toString == coll.id) {
+              ans +:= StoreEntry(ast.LocalVar(v.name, v.typ)(), coll)
+              found = true
+            }
+          }
+          if (!found) {
+            ans +:= StoreEntry(ast.LocalVar(v.name, v.typ)(), vari)
+          }
+        }
+      }
+    }
+    StoreCounterexample(ans)
+  }
+}
+
 
 /**
   * Transforms a counterexample returned by Boogie back to a Viper counterexample.
@@ -514,32 +571,15 @@ object BoogieModelTransformer {
     */
   def transformCounterexample(e: AbstractError, names: Map[String, Map[String, String]], program: Program, wandNames: Option[Map[MagicWandStructure.MagicWandStructure, Func]]): Unit = {
     if (e.isInstanceOf[VerificationError] && ErrorMemberMapping.mapping.contains(e.asInstanceOf[VerificationError].methodIdentifier)) {
-      val firstCE = IntermediateCounterexampleModel(e, names, program, wandNames)
-      println(firstCE.toString)
+      val ce = CounterexampleGenerator(e, names, program, wandNames)
+      println(ce.toString)
       val finalModel = Map[String, ModelEntry]()
-      for ((k, v) <- e.asInstanceOf[VerificationError].failureContexts(0).counterExample.get.model.entries)
-        println(k.toString ++ " --> " ++ v.toString)
+//      for ((k, v) <- e.asInstanceOf[VerificationError].failureContexts(0).counterExample.get.model.entries)
+//        println(k.toString ++ " --> " ++ v.toString)
       val model = Model(finalModel)
       println("Model:")
-      println(model)
-
-
-//      println("Old Heap:")
-//      for ((reference, field, value, permission) <- oldHeapMap)
-//        println(s"Ref: $reference, Field: $field, Value: $value, Perm: $permission")
-//      println("Return Heap:")
-//      for ((reference, field, value, permission) <- retHeapMap)
-//        println(s"Ref: $reference, Field: $field, Value: $value, Perm: $permission")
-      // val (evalOldHeap, evalRetHeap) = evaluateHT(workingModel, basicCEheapTypesName, oldHeapMap, retHeapMap, program.predicatesByName.keySet, program.fieldsByName.keySet, prepareMWnames(wandNames))
-      //val finalCounterexample = (ceBasicTypes, evalOldHeap, evalRetHeap)
-//      println("At old:")
-//      for ((name, (value, perm)) <- evalOldHeap)
-//        println(s"Name: $name, Value: $value, Perm: $perm")
-//      println("On return:")
-//      for ((name, (value, perm)) <- evalRetHeap)
-//        println(s"Name: $name, Value: $value, Perm: $perm")
-
-      //e.asInstanceOf[VerificationError].failureContexts = Seq(FailureContextImpl(Some(SimpleCounterexample(model))))
+      //println(model)
+      //e.asInstanceOf[VerificationError].failureContexts +:= FailureContextImpl(Some(SimpleCounterexample(model)))
     }
   }
 
