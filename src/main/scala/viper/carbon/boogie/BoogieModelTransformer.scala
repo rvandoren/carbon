@@ -1,13 +1,11 @@
 package viper.carbon.boogie
 
-import viper.carbon.boogie.IntermediateCounterexampleModel.transformModelEntries
-
 import scala.collection.{Seq, mutable}
 import util.control.Breaks._
 import viper.carbon.verifier.FailureContextImpl
 import viper.silver.ast
-import viper.silver.ast.{Literal, Member}
-import viper.silver.verifier.{AbstractError, ApplicationEntry, ConstantEntry, FailureContext, MapEntry, Model, ModelEntry, SimpleCounterexample, UnspecifiedEntry, VerificationError}
+import viper.silver.ast.{Literal, Member, Field, Predicate, Label}
+import viper.silver.verifier.{AbstractError, ApplicationEntry, ConstantEntry, ValueEntry, FailureContext, MapEntry, Model, ModelEntry, SimpleCounterexample, UnspecifiedEntry, VerificationError}
 import viper.silver.ast.{AbstractLocalVar, Declaration, LocalVar, MagicWandStructure, Program, Type}
 
 case class CounterexampleGenerator(e: AbstractError, names: Map[String, Map[String, String]], program: Program, wandNames: Option[Map[MagicWandStructure.MagicWandStructure, Func]]) {
@@ -16,70 +14,81 @@ case class CounterexampleGenerator(e: AbstractError, names: Map[String, Map[Stri
   val imCE = IntermediateCounterexampleModel(ve, errorMethod, names, program, wandNames)
   println(imCE.toString)
 
-  val store = CounterexampleGenerator.detStore(program.methodsByName.get(errorMethod.name).get.scopedDecls, imCE.basicVariables, imCE.allCollections)
-  //val heaps = Seq[Seq[(Declaration, HeapInstance)]]
-  val domains = null
-  //val out = findCorrespondingStoreValue(imCE.basicVariables, imCE.allCollections)
+  val ceStore = CounterexampleGenerator.detStore(program.methodsByName.get(errorMethod.name).get.transitiveScopedDecls, imCE.basicVariables, imCE.allCollections)
+  var ceHeaps = Seq[(String, HeapCounterexample)]()
+  imCE.allBasicHeaps.reverse.foreach { case (n, h) => ceHeaps +:= ((n, CounterexampleGenerator.detHeap(imCE.workingModel, h, program, imCE.allCollections))) }
+  //val domains = null
 
   override def toString: String = {
-    var finalString = "      Final Counterexampel: \n"
-    finalString ++= "   Store: \n"
-    for (in <- store.storeEntries)
-      finalString ++= (in.toString ++ "\n")
-    finalString ++= "   Old Heap: \n"
-//    for (in <- allHeapInstances(0).basicHeapEntries)
-//      finalString ++= (in.toString ++ "\n")
-//    finalString ++= "Return Heap: \n"
-//    for (in <- allHeapInstances(allHeapInstances.length - 1).basicHeapEntries)
-//      finalString ++= (in.toString ++ "\n")
-    finalString ++= "   Domains: \n"
+    var finalString = "      Final Counterexample: \n"
+    finalString += "   Store: \n"
+    finalString += ceStore.storeEntries.map(x => x.toString).mkString("", "\n", "\n")
+    finalString += ceHeaps.map(x => "   " + x._1 + " Heap: \n" + x._2.toString).mkString("")
+    finalString += "   Domains: \n"
     finalString
   }
 }
 
 case class IntermediateCounterexampleModel(ve: VerificationError, errorMethod: Member, names: Map[String, Map[String, String]], program: Program, wandNames: Option[Map[MagicWandStructure.MagicWandStructure, Func]]) {
   val originalEntries = ve.failureContexts(0).counterExample.get.model
-  //println(originalEntries.entries.toString())
+  println(originalEntries.entries.toString())
   val typenamesInMethod = names.get(errorMethod.name).get.map(e => e._2 -> e._1)
-  val methodVarDecl = program.methodsByName.get(errorMethod.name).get.scopedDecls
+  val methodVarDecl = program.methodsByName.get(errorMethod.name).get.transitiveScopedDecls
 
-  val basicVariables = IntermediateCounterexampleModel.detCEvariables(originalEntries.entries, typenamesInMethod, methodVarDecl)
+  val (basicVariables, otherDeclarations) = IntermediateCounterexampleModel.detCEvariables(originalEntries.entries, typenamesInMethod, methodVarDecl)
   val allSequences = IntermediateCounterexampleModel.detSequences(originalEntries)
   val allSets = IntermediateCounterexampleModel.detSets(originalEntries)
   val allCollections = allSequences ++ allSets
 
   val workingModel = IntermediateCounterexampleModel.buildNewModel(originalEntries.entries)
-  val hmStates = IntermediateCounterexampleModel.oldAndReturnHeapMask(workingModel)
-  val allHeapInstances = IntermediateCounterexampleModel.detHeapTypes(workingModel, hmStates)
-
-
+  val (hmLabels, hmStates) = IntermediateCounterexampleModel.oldAndReturnHeapMask(workingModel, otherDeclarations)
+  val allBasicHeaps = IntermediateCounterexampleModel.detHeaps(workingModel, hmStates, originalEntries, hmLabels, program)
 
   override def toString: String = {
-    var finalString = "      Intermediate Counterexampel: \n"
-    finalString ++= "   Store: \n"
-    for (in <- basicVariables)
-      finalString ++= (in.toString ++ "\n")
-    for (in <- allCollections)
-      finalString ++= (in.toString ++ "\n")
-    finalString ++= "   Old Heap: \n"
-    if (allHeapInstances.length > 0) {
-      for (in <- allHeapInstances(0).basicHeapEntries)
-        finalString ++= (in.toString ++ "\n")
-      finalString ++= "   Return Heap: \n"
-      for (in <- allHeapInstances(allHeapInstances.length - 1).basicHeapEntries)
-        finalString ++= (in.toString ++ "\n")
-    }
+    var finalString = "      Intermediate Counterexample: \n"
+    finalString ++= "   Local Information: \n"
+    if (!basicVariables.isEmpty) finalString += basicVariables.map(x => x.toString).mkString("", "\n", "\n")
+    if (!allCollections.isEmpty) finalString += allCollections.map(x => x.toString).mkString("", "\n", "\n")
+    finalString += allBasicHeaps.map(x => "   " + x._1 + " Heap: \n" + x._2.toString).mkString("", "\n", "\n")
     finalString ++= "   Domains: \n"
     finalString
   }
 }
 
 case class StoreCounterexample(storeEntries: Seq[StoreEntry]) {
+  var finalString = ""
+  storeEntries.foreach { se => finalString ++= se.toString + "\n"}
+  override lazy val toString = finalString
+}
 
-}
 case class StoreEntry(id: AbstractLocalVar, entry: CEValue) {
-  override lazy val toString = s"Variable Name: ${id.name}, Value: ${entry.value}, Type: ${id.typ.toString}"
+  override lazy val toString = {
+    entry match {
+      case CEVariable(_, _, _) => s"Variable Name: ${id.name}, Value: ${entry.value.toString}, Type: ${id.typ.toString}"
+      case _ => s"  Collection variable ${id.name} of type ${id.typ.toString}: \n ${entry.toString}"
+    }
+  }
 }
+
+case class HeapCounterexample(heapEntries: Seq[(Member, FinalHeapEntry)]) {
+  var finalString = ""
+  heapEntries.foreach { se => finalString ++= se._2.toString ++ "\n" }
+  override lazy val toString = finalString
+}
+
+sealed trait FinalHeapEntry
+case class FieldFinalEntry(ref: String, field: String, entry: CEValue, perm: Option[Rational], typ: Type) extends FinalHeapEntry {
+  override lazy val toString = s"Field Entry: $ref.$field --> (Value: ${entry.value.toString}, Type: ${typ}, Perm: ${perm.getOrElse("#undefined").toString})"
+}
+
+case class PredFinalEntry(name: String, args: Seq[String], perm: Option[Rational]) extends FinalHeapEntry {
+  override lazy val toString = s"Predicate Entry: $name(${args.mkString("(", ", ", ")")} --> (Perm: ${perm.getOrElse("#undefined").toString})"
+}
+
+case class WandFinalEntry(firstPart: String, secondPart: String, args: Seq[String], perm: Option[Rational]) extends FinalHeapEntry {
+  override lazy val toString = "to do"
+}
+
 sealed trait CEValue {
   val id : String
   val value : Any
@@ -90,21 +99,39 @@ case class CEVariable(name: String, entryValue: ModelEntry, typ: Option[Type]) e
   val id = name
   val value = entryValue
   val valueType = typ
-  override lazy val toString = s"Variable Name: ${name}, Value: ${value.toString}, Type: ${typ.getOrElse("None").toString}"
+  override lazy val toString = s"Variable Name: ${name}, Value: ${value.toString}, Type: ${typ.getOrElse("Not determined!").toString}"
 }
 
-case class CESequence(name: String, sequence: Seq[String], memberTypes: Option[Type]) extends CEValue {
+case class CESequence(name: String, length: BigInt, entries: Map[BigInt, String], sequence: Seq[String], memberTypes: Option[Type]) extends CEValue {
   val id = name
   val value = sequence
   val valueType = memberTypes
-  override lazy val toString = s"Sequence: $name --> $sequence, Type: Seq($memberTypes)"
+  val size = length
+  val inside = entries
+  override lazy val toString = {
+    var finalString = s"Set $name of size ${size.toString()} with entries:"
+    for ((k,v) <- inside)
+      finalString ++= s"\n $v at index ${k.toString()}"
+    finalString
+  }
+
 }
 
-case class CESet(name: String, set: Set[String], memberTypes: Option[Type]) extends CEValue {
+case class CESet(name: String, cardinality: BigInt, containment: Map[String, Boolean], set: Set[String], memberTypes: Option[Type]) extends CEValue {
   val id = name
   val value = set
   val valueType = memberTypes
-  override lazy val toString = s"Set: $name --> $set, Type: Set($memberTypes)"
+  val size = cardinality
+  val inside = containment
+  override lazy val toString = {
+    var finalString = s"Set $name of size ${size.toString()} with entries: {"
+    for ((k, v) <- inside) {
+      if (v) {
+        finalString ++= s" $k,"
+      }
+    }
+    finalString ++ "}"
+  }
 }
 
 case class CEMultiset(name: String, multiset: Set[String], memberTypes: Option[Type]) extends CEValue {
@@ -115,45 +142,42 @@ case class CEMultiset(name: String, multiset: Set[String], memberTypes: Option[T
 }
 
 case class BasicHeap(basicHeapEntries: Set[BasicHeapEntry]) {
-  var finalString = ""
-  basicHeapEntries.foreach{case x => finalString ++= (x.toString ++ "\n")}
-  override lazy val toString = finalString
+  override lazy val toString = basicHeapEntries.map(x => x.toString).mkString("", "\n", "")
 }
 
-case class BasicHeapEntry(reference: String, field: String, valueID: String, perm: Option[IntLit], typ: String) {
-  override lazy val toString = s"Basic heap entry: $reference + $field --> (Value: $valueID, Permission: ${perm.getOrElse("None")})"
+case class BasicHeapEntry(reference: Seq[String], field: Seq[String], valueID: String, perm: Option[Rational], het: HeapEntryType) {
+  override lazy val toString = s"Basic heap entry: ${reference.mkString("(", ", ", ")")} + ${field.mkString("(", ", ", ")")} --> (Value: $valueID, Permission: ${perm.getOrElse("None")})"
 }
-
-
-
-
-
-
-case class EvaluatedHeap(finalHeapEntries: Set[FinalHeapEntry])
-
-sealed trait FinalHeapEntry
-
-case class FieldAccess(reference: String, fields: Seq[String], valueID: String, perm: Option[Literal])
-
 
 object IntermediateCounterexampleModel {
 
-  def detCEvariables(originalEntries: Map[String, ModelEntry], namesInMember: Map[String, String], variables: Seq[Declaration]): Seq[CEVariable] = {
+  def detCEvariables(originalEntries: Map[String, ModelEntry], namesInMember: Map[String, String], variables: Seq[Declaration]): (Seq[CEVariable], Seq[Declaration]) = {
     var res = Seq[CEVariable]()
+    var otherDeclarations = Seq[Declaration]()
     val modelVariables = transformModelEntries(originalEntries, namesInMember)
     for ((name, entry) <- modelVariables) {
       for (temp <- variables) {
-        val v = temp.asInstanceOf[ast.LocalVarDecl]
-        if (v.name == name) {
-          var ent = entry
-          if (entry.isInstanceOf[MapEntry]) {
-            ent = entry.asInstanceOf[MapEntry].options.head._1(0)
+        if (temp.isInstanceOf[ast.LocalVarDecl]) {
+          val v = temp.asInstanceOf[ast.LocalVarDecl]
+          if (v.name == name) {
+            var ent = entry
+            if (entry.isInstanceOf[MapEntry]) {
+              ent = entry.asInstanceOf[MapEntry].options.head._1(0)
+            }
+            res +:= CEVariable(v.name, ent, Some(v.typ))
           }
-          res +:= CEVariable(v.name, ent, Some(v.typ))
+        } else {
+          otherDeclarations +:= temp
         }
       }
     }
-    res
+    if (originalEntries.contains("null")) {
+      val nullRef = originalEntries.get("null").get
+      if (nullRef.isInstanceOf[ConstantEntry]) {
+        res +:= CEVariable("null", nullRef, Some(ast.Ref))
+      }
+    }
+    (res, otherDeclarations)
   }
 
   def transformModelEntries(originalEntries: Map[String, ModelEntry], namesInMember: Map[String, String]): mutable.Map[String, ModelEntry] = {
@@ -195,15 +219,6 @@ object IntermediateCounterexampleModel {
     }
   }
 
-  def boogieTypeToSilverType(inType: viper.carbon.boogie.Type): Option[ast.Type] = {
-    inType match {
-      case Int => Some(ast.Int)
-      case Bool => Some(ast.Bool)
-      case Real => Some(ast.TypeVar("Real"))
-      case _ => None
-    }
-  }
-
   // a CE generator for sequences
   def detSequences(model: Model): Set[CEValue] = {
     var res = Map[String, Seq[String]]()
@@ -221,7 +236,7 @@ object IntermediateCounterexampleModel {
             res += (v.toString -> Seq())
           }
         }
-      } else if (opName != "Seq#Singleton" && opName != "Seq#Range" && opName.startsWith("Seq#")) {
+      } else if (opName == "Seq#Append" || opName == "Seq#Take" || opName == "Seq#Drop" || opName == "Seq#Index") {
         if (opValues.isInstanceOf[MapEntry]) {
           for ((k, v) <- opValues.asInstanceOf[MapEntry].options) {
             tempMap += ((opName, k.map(x => x.toString)) -> v.toString)
@@ -229,7 +244,7 @@ object IntermediateCounterexampleModel {
         }
       }
     }
-    for ((opName, opValues) <- tempMap) {
+    for ((opName, opValues) <- model.entries) {
       if (opName == "Seq#Singleton") {
         if (opValues.isInstanceOf[MapEntry]) {
           for ((k, v) <- opValues.asInstanceOf[MapEntry].options) {
@@ -252,9 +267,11 @@ object IntermediateCounterexampleModel {
         if (opName == "Seq#Append") {
           (res.get(k(0)), res.get(k(1))) match {
             case (Some(x), Some(y)) =>
-              res += (v -> (x ++ y))
-              tempMap -= ((opName, k))
-              found = true
+              if (!res.contains(v)) {
+                res += (v -> (x ++ y))
+                tempMap -= ((opName, k))
+                found = true
+              }
             case (_, _) => //
           }
         } else if (opName == "Seq#Take") {
@@ -291,7 +308,15 @@ object IntermediateCounterexampleModel {
           case Some(x) => Some(ast.SeqType(x))
           case None => None
         }
-        ans += CESequence(n, s, typ)
+        var entries = Map[BigInt, String]()
+        var counter = 0
+        for (e <- s) {
+          if (e != "#undefined") {
+            entries += (BigInt(counter) -> e)
+          }
+          counter += 1
+        }
+        ans += CESequence(n, BigInt(s.length), entries, s, typ)
     }
     ans
   }
@@ -369,7 +394,13 @@ object IntermediateCounterexampleModel {
           case Some(x) => Some(ast.SetType(x))
           case None => None
         }
-        ans += CESet(n, s, typ)
+        var containment = Map[String, Boolean]()
+        for (e <- s) {
+          if (e != "#undefined") {
+            containment += (e -> true)
+          }
+        }
+        ans += CESet(n, BigInt(s.size), containment, s, typ)
     }
     ans
   }
@@ -412,7 +443,7 @@ object IntermediateCounterexampleModel {
   }
 
   // determine the identifier for the different Heap and Mask instances
-  def oldAndReturnHeapMask(workingModel: Map[Seq[String], String]): List[(String, String, String, String)] = {
+  def oldAndReturnHeapMask(workingModel: Map[Seq[String], String], labels: Seq[Declaration]): (Map[String, (String, String)], List[(String, String, String, String)]) = {
     var heapInstances = Set[(String, String)]()
     var maskInstances = Set[(String, String)]()
     var states = Set[(String, String)]()
@@ -464,58 +495,219 @@ object IntermediateCounterexampleModel {
         acc
     }
 
-    filteredList
+    var labelsHeapMask = Map[String, (String, String)]()
+    labelsHeapMask += ("old" -> (filteredList(0)._3, filteredList(0)._4))
+    for (l <- labels) {
+      l match {
+        case ast.Label(n, _) =>
+          val lhi = "Label" + n + "Heap"
+          val lmi = "Label" + n + "Mask"
+          if (workingModel.contains(Seq(lhi)) && workingModel.contains(Seq(lmi))) {
+            labelsHeapMask += (n -> (workingModel.get(Seq(lhi)).get, workingModel.get(Seq(lmi)).get))
+          }
+        case _ => //
+      }
+    }
+    labelsHeapMask += ("return" -> (filteredList(filteredList.length-1)._3, filteredList(filteredList.length-1)._4))
+
+    (labelsHeapMask, filteredList)
   }
 
-  def detHeapTypes(opMapping: Map[Seq[String], String], hmStates: List[(String, String, String, String)]): Seq[BasicHeap] = {
-    var permMap = Map[String, String]()
+  def detHeaps(opMapping: Map[Seq[String], String], hmStates: List[(String, String, String, String)], model: Model, hmLabels: Map[String, (String, String)], program: Program): Seq[(String, BasicHeap)] = {
     var heapOp = Map[Seq[String], String]()
     var maskOp = Map[Seq[String], String]()
+    var qpMaskSet = Set[String]()
     for ((key, value) <- opMapping) {
-      if (key(0) == "U_2_real") {
-        permMap += (key(1) -> value)
-      } else if (key(0).startsWith("MapType0Select")) {
+      if (key(0).startsWith("MapType0Select")) {
         heapOp += (key -> value)
       } else if (key(0).startsWith("MapType1Select")) {
         maskOp += (key -> value)
+      } else if (key(0).startsWith("QPMask@")) {
+        qpMaskSet += value
       }
     }
-
-    var res = Seq[Set[BasicHeapEntry]]()
-    for (heapInstance <- 0 to hmStates.length-1) {
-      var retSet = Set[BasicHeapEntry]()
-      for ((_, _, heapIdentifier, maskIdentifier) <- hmStates.slice(0, heapInstance).reverse) {
-        for ((maskKey, perm) <- maskOp) {
-          val maskId = maskKey(1)
-          val reference = maskKey(2)
-          val field = maskKey(3)
-          if (maskId == maskIdentifier) {
-            if (!retSet.exists({ case bhe => (bhe.reference == reference) && (bhe.field == field) })) {
-              heapOp.get(Seq("MapType0Select", heapIdentifier, reference, field)) match {
-                case Some(v) => retSet += BasicHeapEntry(reference, field, v, Some(IntLit(BigInt(permMap.get(perm).get.toFloat.toInt))), "not defined")
-                case None => retSet += BasicHeapEntry(reference, field, "#undefined", Some(IntLit(BigInt(permMap.get(perm).get.toFloat.toInt))), "not defined")
-              }
-            } else {
-              retSet.find({ case bhe => (bhe.reference == reference) && (bhe.field == field) && (bhe.valueID == "#undefined") }) match {
-                case Some(v) =>
+    var predContentMap = Map[String, Seq[String]]()
+    for (predName <- program.predicates.map(x => x.name)) {
+      val predEntry = model.entries.get(predName).getOrElse(model.entries.find{ case (x, _) => (x.startsWith(predName ++ "_") && !x.contains("@"))}.getOrElse(ConstantEntry("")))
+      if (predEntry.isInstanceOf[MapEntry] && !predEntry.asInstanceOf[MapEntry].options.isEmpty) {
+        val (predContent, predId) = predEntry.asInstanceOf[MapEntry].options.head
+        predContentMap += (predId.toString -> predContent.map(x => x.toString))
+      }
+    }
+    val permMap = model.entries.get("U_2_real").get.asInstanceOf[MapEntry].options
+    println(permMap)
+    var res = Seq[(String, BasicHeap)]()
+    for ((labelName, (labelHeap, labelMask)) <- hmLabels) {
+      var heapEntrySet = Set[BasicHeapEntry]()
+      val heapStore = model.entries.get("MapType0Store").get.asInstanceOf[MapEntry].options
+      val maskStore = model.entries.get("MapType1Store").get.asInstanceOf[MapEntry].options
+      val heapMap = recursiveBuildHeapMask(heapStore, labelHeap, Map.empty)
+      val maskMap = recursiveBuildHeapMask(maskStore, labelMask, Map.empty)
+      val commonKeys = heapMap.keys.toSet.intersect(maskMap.keys.toSet)
+      for (ck <- commonKeys) {
+        val value = heapMap.get(ck).get
+        val perm = maskMap.get(ck).get
+        var tempPerm: Option[Rational] = detHeapEntryPermission(permMap, perm._1)
+        val typ: HeapEntryType = detHeapType(model, qpMaskSet, ck(1), perm._2)
+        if (typ == FieldType || typ == QPFieldType) {
+          heapEntrySet += BasicHeapEntry(Seq(ck(0)), Seq(ck(1)), value._1, tempPerm, typ)
+        } else if (typ == PredicateType || typ == QPPredicateType) {
+          heapEntrySet += BasicHeapEntry(Seq(ck(0), ck(1)), predContentMap.get(ck(1)).getOrElse(Seq()), value._1, tempPerm, typ)
+        } else if (typ == MagicWandType || typ == QPMagicWandType) {
+          //TODO
+        }
+      }
+      var startNow = false
+      for ((_, _, heapIdentifier, maskIdentifier) <- hmStates.reverse) {
+        if (heapIdentifier == labelHeap && maskIdentifier == labelMask) {
+          startNow = true
+        }
+        if (startNow) {
+          for ((maskKey, perm) <- maskOp) {
+            val maskId = maskKey(1)
+            val reference = maskKey(2)
+            val field = maskKey(3)
+            if (maskId == maskIdentifier) {
+              if (!heapEntrySet.exists({
+                case bhe =>
+                  ((bhe.reference.length > 0) && (bhe.field.length > 0) && (bhe.reference(0) == reference) && (bhe.field(0) == field)) ||
+                  ((bhe.reference.length > 1) && (bhe.reference(0) == reference) && (bhe.reference(1) == field))
+              //TODO: implement a case for MW
+              })) {
+                var tempPerm: Option[Rational] = detHeapEntryPermission(permMap, perm)
+                val typ: HeapEntryType = detHeapType(model, qpMaskSet, field, maskId)
+                if (typ == FieldType || typ == QPFieldType) {
                   heapOp.get(Seq("MapType0Select", heapIdentifier, reference, field)) match {
-                    case Some(x) =>
-                      retSet += BasicHeapEntry(reference, field, x, v.perm, "not defined")
-                      retSet -= BasicHeapEntry(reference, field, "#undefined", v.perm, "not defined")
-                    case None => //
+                    case Some(v) => heapEntrySet += BasicHeapEntry(Seq(reference), Seq(field), v, tempPerm, typ)
+                    case None => heapEntrySet += BasicHeapEntry(Seq(reference), Seq(field), "#undefined", tempPerm, typ)
                   }
-                case None => //
+                } else if (typ == PredicateType || typ == QPPredicateType) {
+                  heapOp.get(Seq("MapType0Select", heapIdentifier, reference, field)) match {
+                    case Some(v) => heapEntrySet += BasicHeapEntry(Seq(reference, field), predContentMap.get(field).getOrElse(Seq()), v, tempPerm, typ)
+                    case None => heapEntrySet += BasicHeapEntry(Seq(reference, field), predContentMap.get(field).getOrElse(Seq()), "#undefined", tempPerm, typ)
+                  }
+                } else if (typ == MagicWandType || typ == QPMagicWandType) {
+
+                }
+
+              } else {
+                heapEntrySet.find(
+                  { case bhe => (bhe.het == FieldType || bhe.het == QPFieldType) && (bhe.reference(0) == reference) && (bhe.field(0) == field) && (bhe.valueID == "#undefined") }
+                ) match {
+                  case Some(v) =>
+                    heapOp.get(Seq("MapType0Select", heapIdentifier, reference, field)) match {
+                      case Some(x) =>
+                        heapEntrySet += BasicHeapEntry(Seq(reference), Seq(field), x, v.perm, v.het)
+                        heapEntrySet -= BasicHeapEntry(Seq(reference), Seq(field), "#undefined", v.perm, v.het)
+                      case None => //
+                    }
+                  case None => //
+                }
+                heapEntrySet.find(
+                  { case bhe => (bhe.het == PredicateType || bhe.het == QPPredicateType) && (bhe.reference(0) == reference) && (bhe.reference(1) == field) && (bhe.valueID == "#undefined") }
+                ) match {
+                  case Some(v) =>
+                    heapOp.get(Seq("MapType0Select", heapIdentifier, reference, field)) match {
+                      case Some(x) =>
+                        heapEntrySet += BasicHeapEntry(Seq(reference, field), predContentMap.get(field).getOrElse(Seq()), x, v.perm, v.het)
+                        heapEntrySet -= BasicHeapEntry(Seq(reference, field), predContentMap.get(field).getOrElse(Seq()), "#undefined", v.perm, v.het)
+                      case None => //
+                    }
+                  case None => //
+                }
+                //TODO: Magic Wands
+//                heapEntrySet.find(
+//                  { case bhe => (bhe.het == MagicWandType || bhe.het == QPMagicWandType) && (bhe.reference == reference) && (bhe.field == field) && (bhe.valueID == "#undefined") }
+//                ) match {
+//                  case Some(v) =>
+//                    heapOp.get(Seq("MapType0Select", heapIdentifier, reference, field)) match {
+//                      case Some(x) =>
+//                        heapEntrySet += BasicHeapEntry(reference, field, x, v.perm, v.het)
+//                        heapEntrySet -= BasicHeapEntry(reference, field, "#undefined", v.perm, v.het)
+//                      case None => //
+//                    }
+//                  case None => //
+//                }
               }
             }
           }
         }
       }
-      res +:= retSet
+      res +:= (labelName, BasicHeap(heapEntrySet))
     }
 
-    var ans = Seq[BasicHeap]()
-    res.foreach{ case x => ans +:= BasicHeap(x)}
-    ans
+    res
+  }
+
+  def detHeapType(model: Model, qpMaskSet: Set[String], id: String, maskId: String): HeapEntryType = {
+    var predIdSet = Set[String]()
+    if (model.entries.get("IsPredicateField").get.isInstanceOf[MapEntry]) {
+      for ((k, v) <- model.entries.get("IsPredicateField").get.asInstanceOf[MapEntry].options) {
+        if (v.toString == "true") {
+          predIdSet += k(0).toString
+        }
+      }
+    }
+    var mwIdSet = Set[String]()
+    if (model.entries.get("IsWandField").get.isInstanceOf[MapEntry]) {
+      for ((k, v) <- model.entries.get("IsWandField").get.asInstanceOf[MapEntry].options) {
+        if (v.toString == "true") {
+          mwIdSet += k(0).toString
+        }
+      }
+    }
+    var typ: HeapEntryType = FieldType
+    if (predIdSet.contains(id)) {
+      if (qpMaskSet.contains(maskId)) {
+        typ = QPPredicateType
+      } else {
+        typ = PredicateType
+      }
+    } else if (mwIdSet.contains(id)) {
+      if (qpMaskSet.contains(maskId)) {
+        typ = QPMagicWandType
+      } else {
+        typ = MagicWandType
+      }
+    } else {
+      if (qpMaskSet.contains(maskId)) {
+        typ = QPFieldType
+      }
+    }
+    typ
+  }
+
+  def detHeapEntryPermission(permMap: Map[scala.collection.immutable.Seq[ValueEntry], ValueEntry], perm: String): Option[Rational] = {
+    for ((s, ve) <- permMap) {
+      if (s(0).toString == perm) {
+        if (ve.isInstanceOf[ConstantEntry]) {
+          return Some(Rational.apply(BigInt(ve.asInstanceOf[ConstantEntry].value.toFloat.toInt), BigInt(1)))
+        } else if (ve.isInstanceOf[ApplicationEntry]) {
+          val ae = ve.asInstanceOf[ApplicationEntry]
+          return Some(Rational.apply(BigInt(ae.arguments(0).asInstanceOf[ConstantEntry].value.toFloat.toInt), BigInt(ae.arguments(1).asInstanceOf[ConstantEntry].value.toFloat.toInt)))
+        }
+      }
+    }
+    None
+  }
+
+  def recursiveBuildHeapMask(inputMap: Map[scala.collection.immutable.Seq[ValueEntry], ValueEntry], s: String, resultMap: Map[Seq[String], (String, String)]): Map[Seq[String], (String, String)] = {
+    val entries: Iterable[(Seq[ValueEntry], ValueEntry)] = inputMap.collect {
+      case (key, value) if value.toString == s && key.length >= 3 => (key, value)
+    }
+    if (entries.isEmpty) {
+      return resultMap
+    }
+    entries.foldLeft (resultMap) {
+      case (accMap, (entry, value)) =>
+        val newStartString = entry(0)
+        val newKey = entry.tail.init.map(x => x.toString)
+        var newResultMap = accMap
+        if (!accMap.contains(newKey)) {
+          newResultMap += (newKey -> (entry.last.toString, value.toString))
+        }
+        recursiveBuildHeapMask(inputMap, newStartString.toString, newResultMap)
+    }
   }
 
   // "replaceEntriesModel" choose all the operations for specific type supported in the CE
@@ -540,23 +732,119 @@ object CounterexampleGenerator {
   def detStore(store: Seq[Declaration], variables: Seq[CEVariable], collections: Set[CEValue]): StoreCounterexample = {
     var ans = Seq[StoreEntry]()
     for (k <- store) {
-      val v = k.asInstanceOf[ast.LocalVarDecl]
-      for (vari <- variables) {
-        if (v.name == vari.name) {
-          var found = false
-          for (coll <- collections) {
-            if (vari.entryValue.toString == coll.id) {
-              ans +:= StoreEntry(ast.LocalVar(v.name, v.typ)(), coll)
-              found = true
+      if (k.isInstanceOf[ast.LocalVarDecl]) {
+        val v = k.asInstanceOf[ast.LocalVarDecl]
+        for (vari <- variables) {
+          if (v.name == vari.name) {
+            var found = false
+            for (coll <- collections) {
+              if (vari.entryValue.toString == coll.id) {
+                ans +:= StoreEntry(ast.LocalVar(v.name, v.typ)(), coll)
+                found = true
+              }
             }
-          }
-          if (!found) {
-            ans +:= StoreEntry(ast.LocalVar(v.name, v.typ)(), vari)
+            if (!found) {
+              ans +:= StoreEntry(ast.LocalVar(v.name, v.typ)(), vari)
+            }
           }
         }
       }
     }
     StoreCounterexample(ans)
+  }
+
+  def detHeap(opMapping: Map[Seq[String], String], basicHeap: BasicHeap, program: Program, collections: Set[CEValue]): HeapCounterexample = {
+    // choosing all the needed values from the Boogie Model
+    var usedIdent = Map[String, Member]()
+    for ((key, value) <- opMapping) {
+      for (fie <- program.fields) {
+        if (key(0) == fie.name || (key(0).startsWith(fie.name ++ "_") && !key.contains("@"))) {
+          usedIdent += (value -> fie)
+        }
+      }
+      for (pred <- program.predicates) {
+        if (key(0) == pred.name || (key(0).startsWith(pred.name ++ "_") && !key.contains("@"))) {
+          usedIdent += (value -> pred)
+        }
+      }
+//      for ((interName, origName) <- mwNamesMap) {
+//        if (key(0) == interName) {
+//          usedIdent += (value -> (Seq(origName) ++ key.tail).toString())
+//        }
+//      }
+    }
+
+    var ans = Seq[(Member, FinalHeapEntry)]()
+    var tempOld = Set[(String, String, String, String)]()
+    var tempRef = Map[String, String]()
+    var added = false
+    for (bhe <- basicHeap.basicHeapEntries) {
+      bhe.het match {
+        case FieldType | QPFieldType=>
+          usedIdent.get(bhe.field(0)) match {
+            case Some(f) =>
+              val fi = f.asInstanceOf[Field]
+              var found = false
+              for (coll <- collections) {
+                if (bhe.valueID == coll.id) {
+                  ans +:= (fi, FieldFinalEntry(bhe.reference(0), fi.name, coll, bhe.perm, fi.typ))
+                  found = true
+                }
+              }
+              if (!found) {
+                ans +:= (fi, FieldFinalEntry(bhe.reference(0), fi.name, CEVariable("#undefined", ConstantEntry(bhe.valueID), Some(fi.typ)), bhe.perm, fi.typ))
+              }
+            case None => println(s"Could not find a field node for: ${bhe.toString}")
+          }
+        case PredicateType | QPPredicateType =>
+          usedIdent.get(bhe.reference(1)) match {
+            case Some(p) =>
+              val pr = p.asInstanceOf[Predicate]
+              ans +:= (pr, PredFinalEntry(pr.name, bhe.field, bhe.perm))
+            case None => println(s"Could not find a predicate node for: ${bhe.toString}")
+          }
+          //TODO: Implement MW and recursive fields
+        case _ => println("This type of heap entry could not be matched correctly!")
+      }
+
+
+      //      usedIdent.get(bhe.reference) match {
+      //
+      //        case Some(x) =>
+      //          if (b)
+      //          var found = false
+      //          for ((refName, refValue) <- members) {
+      //            if (refValue == reference) {
+      //              found = true
+      //              mappedNames += (refName ++ "." ++ usedIdent.get(field).get -> (value, permission))
+      //              if (bhe.value.startsWith("T@U!val!")) {
+      //                tempRef += (bhe.value -> (refName ++ "." ++ usedIdent.get(field).get))
+      //                added = true
+      //              }
+      //            }
+      //          }
+      //          if (!found) {
+      //            tempOld += ((reference, field, value, permission))
+      //          }
+      //      }
+      //    }
+      //    while (added) {
+      //      added = false
+      //      for ((reference, field, value, permission) <- tempOld) {
+      //        tempRef.get(reference) match {
+      //          case Some(x) =>
+      //            tempOld -= ((reference, field, value, permission))
+      //            mappedNames += (x ++ "." ++ usedIdent.get(field).get -> (value, permission))
+      //            if (value.startsWith("T@U!val!")) {
+      //              tempRef += (value -> (x ++ "." ++ usedIdent.get(field).get))
+      //              added = true
+      //            }
+      //          case None => //
+      //        }
+      //      }
+      //    }
+    }
+    HeapCounterexample(ans)
   }
 }
 
@@ -579,7 +867,7 @@ object BoogieModelTransformer {
       val model = Model(finalModel)
       println("Model:")
       //println(model)
-      //e.asInstanceOf[VerificationError].failureContexts +:= FailureContextImpl(Some(SimpleCounterexample(model)))
+      e.asInstanceOf[VerificationError].failureContexts = scala.collection.immutable.Seq(FailureContextImpl(Some(SimpleCounterexample(model))))
     }
   }
 
@@ -610,127 +898,57 @@ object BoogieModelTransformer {
     res
   }
 
-  def evaluateHT(opMapping: Map[Seq[String], String], members: Map[String, String], oldHeap: Set[(String, String, String, String)], retHeap: Set[(String, String, String, String)], predicates: Set[String], fields: Set[String], mwNamesMap: Map[String, String]): (Map[String, (String, String)], Map[String, (String, String)]) = {
-    // choosing all the needed values from the Boogie Model
-    var usedIdent = Map[String, String]()
-    for ((key, value) <- opMapping) {
-      if (key(0) == "null") {
-        usedIdent += (value -> "null")
-      }
-      for ((interName, origName) <- mwNamesMap) {
-        if (key(0) == interName) {
-          usedIdent += (value -> (Seq(origName) ++ key.tail).toString())
-        }
-      }
-      for (fie <- fields) {
-        if (key(0) == fie || (key(0).startsWith(fie ++ "_") && !key.contains("@"))) {
-          usedIdent += (value -> fie)
-        }
-      }
-      for (pre <- predicates) {
-        if (key(0) == pre) {
-          var tempStr = ""
-          for ((refName, refValue) <- members) {
-            if (key(1) == refValue) {
-              tempStr = refName
-            }
-          }
-          for (i <- 2 to key.length-1) {
-            breakable {
-              for ((refName, refValue) <- members) {
-                if (key(i) == refValue) {
-                  tempStr += (", " ++ refName)
-                  break
-                }
-              }
-              tempStr += (", " ++ key(i))
-            }
-          }
-          usedIdent += (value -> s"$pre($tempStr)")
-        }
-      }
-    }
-    // resolve all the names for the Old state
-    var mappedNamesOld = Map[String, (String, String)]()
-    var tempOld = Set[(String, String, String, String)]()
-    var tempRef = Map[String, String]()
-    var added = false
-    for ((reference, field, value, permission) <- oldHeap) {
-      usedIdent.get(reference) match {
-        case Some("null") => mappedNamesOld += (usedIdent.get(field).get -> (value, permission))
-        case _ =>
-          var found = false
-          for ((refName, refValue) <- members) {
-            if (refValue == reference) {
-              found = true
-              mappedNamesOld += (refName ++ "." ++ usedIdent.get(field).get -> (value, permission))
-              if (value.startsWith("T@U!val!")) {
-                tempRef += (value -> (refName ++ "." ++ usedIdent.get(field).get))
-                added = true
-              }
-            }
-          }
-          if (!found) {
-            tempOld += ((reference, field, value, permission))
-          }
-      }
-    }
-    while (added) {
-      added = false
-      for ((reference, field, value, permission) <- tempOld) {
-        tempRef.get(reference) match {
-          case Some(x) =>
-            tempOld -= ((reference, field, value, permission))
-            mappedNamesOld += (x ++ "." ++ usedIdent.get(field).get -> (value, permission))
-            if (value.startsWith("T@U!val!")) {
-              tempRef += (value -> (x ++ "." ++ usedIdent.get(field).get))
-              added = true
-            }
-          case None => //
-        }
-      }
-    }
-    // resolve all the names for the Ret state
-    var mappedNamesReturn = Map[String, (String, String)]()
-    var tempRet = Set[(String, String, String, String)]()
-    tempRef = Map.empty[String, String]
-    added = false
-    for ((reference, field, value, permission) <- retHeap) {
-      usedIdent.get(reference) match {
-        case Some("null") => mappedNamesReturn += (usedIdent.get(field).get -> (value, permission))
-        case _ =>
-          var found = false
-          for ((refName, refValue) <- members) {
-            if (refValue == reference) {
-              found = true
-              mappedNamesReturn += (refName ++ "." ++ usedIdent.get(field).get -> (value, permission))
-              if (value.startsWith("T@U!val!")) {
-                tempRef += (value -> (refName ++ "." ++ usedIdent.get(field).get))
-                added = true
-              }
-            }
-          }
-          if (!found) {
-            tempRet += ((reference, field, value, permission))
-          }
-      }
-    }
-    while (added) {
-      added = false
-      for ((reference, field, value, permission) <- tempRet) {
-        tempRef.get(reference) match {
-          case Some(x) =>
-            tempRet -= ((reference, field, value, permission))
-            mappedNamesReturn += (x ++ "." ++ usedIdent.get(field).get -> (value, permission))
-            if (value.startsWith("T@U!val!")) {
-              tempRef += (value -> (x ++ "." ++ usedIdent.get(field).get))
-              added = true
-            }
-          case None => //
-        }
-      }
-    }
-    (mappedNamesOld, mappedNamesReturn)
+}
+
+sealed trait HeapEntryType
+case object FieldType extends HeapEntryType
+case object PredicateType extends HeapEntryType
+case object QPFieldType extends HeapEntryType
+case object QPPredicateType extends HeapEntryType
+case object MagicWandType extends HeapEntryType
+case object QPMagicWandType extends HeapEntryType
+
+/*
+  Helper class for permissions
+ */
+
+final class Rational(n: BigInt, d: BigInt) extends Ordered[Rational] {
+  require(d != 0, "Denominator of Rational must not be 0.")
+
+  private val g = n.gcd(d)
+  val numerator: BigInt = n / g * d.signum
+  val denominator: BigInt = d.abs / g
+
+  def +(that: Rational): Rational = {
+    val newNum = this.numerator * that.denominator + that.numerator * this.denominator
+    val newDen = this.denominator * that.denominator
+    Rational(newNum, newDen)
+  }
+  def -(that: Rational): Rational = this + (-that)
+  def unary_- = Rational(-numerator, denominator)
+  def abs = Rational(numerator.abs, denominator)
+  def signum = Rational(numerator.signum, 1)
+
+  def *(that: Rational): Rational = Rational(this.numerator * that.numerator, this.denominator * that.denominator)
+  def /(that: Rational): Rational = this * that.inverse
+  def inverse = Rational(denominator, numerator)
+
+  def compare(that: Rational) = (this.numerator * that.denominator - that.numerator * this.denominator).signum
+
+  override def equals(obj: Any) = obj match {
+    case that: Rational => this.numerator == that.numerator && this.denominator == that.denominator
+    case _ => false
   }
 
+  override def hashCode(): Int = viper.silver.utility.Common.generateHashCode(n, d)
+
+  override lazy val toString = s"$numerator/$denominator"
+}
+
+object Rational extends ((BigInt, BigInt) => Rational) {
+  val zero = Rational(0, 1)
+  val one = Rational(1, 1)
+
+  def apply(numer: BigInt, denom: BigInt) = new Rational(numer, denom)
+  def unapply(r: Rational) = Some(r.numerator, r.denominator)
 }
