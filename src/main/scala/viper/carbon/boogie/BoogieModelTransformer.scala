@@ -1,6 +1,7 @@
 package viper.carbon.boogie
 
 import scala.collection.{Seq, mutable}
+import scala.collection.immutable._
 import util.control.Breaks._
 import viper.carbon.verifier.FailureContextImpl
 import viper.silver.ast
@@ -16,8 +17,9 @@ case class CounterexampleGenerator(e: AbstractError, names: Map[String, Map[Stri
 
   val ceStore = CounterexampleGenerator.detStore(program.methodsByName.get(errorMethod.name).get.transitiveScopedDecls, imCE.basicVariables, imCE.allCollections)
   var ceHeaps = Seq[(String, HeapCounterexample)]()
-  imCE.allBasicHeaps.reverse.foreach { case (n, h) => ceHeaps +:= ((n, CounterexampleGenerator.detHeap(imCE.workingModel, h, program, imCE.allCollections))) }
-  //val domains = null
+  imCE.allBasicHeaps.foreach { case (n, h) => ceHeaps +:= ((n, CounterexampleGenerator.detHeap(imCE.workingModel, h, program, imCE.allCollections))) }
+
+  val DomainsAndFunctions = imCE.DomainEntries ++ imCE.nonDomainFunctions
 
   override def toString: String = {
     var finalString = "      Final Counterexample: \n"
@@ -25,6 +27,7 @@ case class CounterexampleGenerator(e: AbstractError, names: Map[String, Map[Stri
     finalString += ceStore.storeEntries.map(x => x.toString).mkString("", "\n", "\n")
     finalString += ceHeaps.map(x => "   " + x._1 + " Heap: \n" + x._2.toString).mkString("")
     finalString += "   Domains: \n"
+    finalString += DomainsAndFunctions.map(x => x.toString).mkString("", "\n", "\n")
     finalString
   }
 }
@@ -38,19 +41,25 @@ case class IntermediateCounterexampleModel(ve: VerificationError, errorMethod: M
   val (basicVariables, otherDeclarations) = IntermediateCounterexampleModel.detCEvariables(originalEntries.entries, typenamesInMethod, methodVarDecl)
   val allSequences = IntermediateCounterexampleModel.detSequences(originalEntries)
   val allSets = IntermediateCounterexampleModel.detSets(originalEntries)
-  val allCollections = allSequences ++ allSets
+  val allMultisets = IntermediateCounterexampleModel.detMultisets(originalEntries)
+  val allCollections = allSequences ++ allSets ++ allMultisets
 
   val workingModel = IntermediateCounterexampleModel.buildNewModel(originalEntries.entries)
   val (hmLabels, hmStates) = IntermediateCounterexampleModel.oldAndReturnHeapMask(workingModel, otherDeclarations)
   val allBasicHeaps = IntermediateCounterexampleModel.detHeaps(workingModel, hmStates, originalEntries, hmLabels, program)
 
+  val DomainEntries = IntermediateCounterexampleModel.getAllDomains(originalEntries, program)
+  val nonDomainFunctions = IntermediateCounterexampleModel.getAllFunctions(originalEntries, program)
+
   override def toString: String = {
     var finalString = "      Intermediate Counterexample: \n"
-    finalString ++= "   Local Information: \n"
+    finalString ++= "   Local Information:\n"
     if (!basicVariables.isEmpty) finalString += basicVariables.map(x => x.toString).mkString("", "\n", "\n")
     if (!allCollections.isEmpty) finalString += allCollections.map(x => x.toString).mkString("", "\n", "\n")
     finalString += allBasicHeaps.map(x => "   " + x._1 + " Heap: \n" + x._2.toString).mkString("", "\n", "\n")
-    finalString ++= "   Domains: \n"
+    finalString ++= "   Domains:\n"
+    finalString += DomainEntries.map(x => x.toString).mkString("", "\n", "\n")
+    finalString += nonDomainFunctions.map(x => x.toString).mkString("", "\n", "\n")
     finalString
   }
 }
@@ -65,7 +74,7 @@ case class StoreEntry(id: AbstractLocalVar, entry: CEValue) {
   override lazy val toString = {
     entry match {
       case CEVariable(_, _, _) => s"Variable Name: ${id.name}, Value: ${entry.value.toString}, Type: ${id.typ.toString}"
-      case _ => s"  Collection variable ${id.name} of type ${id.typ.toString}: \n ${entry.toString}"
+      case _ => s"Collection variable ${id.name} of type ${id.typ.toString}:\n${entry.toString}"
     }
   }
 }
@@ -82,11 +91,17 @@ case class FieldFinalEntry(ref: String, field: String, entry: CEValue, perm: Opt
 }
 
 case class PredFinalEntry(name: String, args: Seq[String], perm: Option[Rational]) extends FinalHeapEntry {
-  override lazy val toString = s"Predicate Entry: $name(${args.mkString("(", ", ", ")")} --> (Perm: ${perm.getOrElse("#undefined").toString})"
+  override lazy val toString = s"Predicate Entry: $name(${args.mkString("", ", ", ")")} --> (Perm: ${perm.getOrElse("#undefined").toString})"
 }
 
 case class WandFinalEntry(firstPart: String, secondPart: String, args: Seq[String], perm: Option[Rational]) extends FinalHeapEntry {
   override lazy val toString = "to do"
+}
+
+case class DomainsCounterxample() {}
+
+case class FunctionFinalEntry(name: String, argtypes: Seq[ast.Type], returnType: ast.Type, options: Map[Seq[CEValue], CEValue], default: CEValue) {
+
 }
 
 sealed trait CEValue {
@@ -109,12 +124,11 @@ case class CESequence(name: String, length: BigInt, entries: Map[BigInt, String]
   val size = length
   val inside = entries
   override lazy val toString = {
-    var finalString = s"Set $name of size ${size.toString()} with entries:"
+    var finalString = s"$name with size ${size.toString()} with entries:"
     for ((k,v) <- inside)
       finalString ++= s"\n $v at index ${k.toString()}"
     finalString
   }
-
 }
 
 case class CESet(name: String, cardinality: BigInt, containment: Map[String, Boolean], set: Set[String], memberTypes: Option[Type]) extends CEValue {
@@ -134,11 +148,17 @@ case class CESet(name: String, cardinality: BigInt, containment: Map[String, Boo
   }
 }
 
-case class CEMultiset(name: String, multiset: Set[String], memberTypes: Option[Type]) extends CEValue {
+case class CEMultiset(name: String, cardinality: BigInt, containment: Map[String, Int], memberTypes: Option[Type]) extends CEValue {
   val id = name
-  val value = multiset
+  val value = containment
   val valueType = memberTypes
-  override lazy val toString = s"Multiset: $name --> $multiset, Type: Multiset($memberTypes)"
+  val size = cardinality
+  override lazy val toString = {
+    var finalString = s"Multiset $name of size ${size.toString()} with entries:"
+    for ((k, v) <- containment)
+      finalString ++= s"\n $k occurs ${v.toString} time"
+    finalString
+  }
 }
 
 case class BasicHeap(basicHeapEntries: Set[BasicHeapEntry]) {
@@ -147,6 +167,28 @@ case class BasicHeap(basicHeapEntries: Set[BasicHeapEntry]) {
 
 case class BasicHeapEntry(reference: Seq[String], field: Seq[String], valueID: String, perm: Option[Rational], het: HeapEntryType) {
   override lazy val toString = s"Basic heap entry: ${reference.mkString("(", ", ", ")")} + ${field.mkString("(", ", ", ")")} --> (Value: $valueID, Permission: ${perm.getOrElse("None")})"
+}
+
+case class BasicDomainEntry(name: String, types: Seq[ast.Type], functions: Seq[BasicFunction]) {
+  override def toString: String = s"domain $valueName{\n ${functions.map(_.toString()).mkString("\n")}\n}"
+  val valueName: String = s"$name${printTypes()}"
+  private def printTypes(): String =
+    if (types.isEmpty) ""
+    else types.map(printType).mkString("[", ", ", "]")
+  private def printType(t: ast.Type): String = t match {
+    case ast.TypeVar(x) => x
+    case _ => t.toString()
+  }
+}
+
+
+case class BasicFunction(fname: String, argtypes: Seq[ast.Type], returnType: ast.Type, options: Map[Seq[String], String], default: String) {
+  override def toString: String = {
+    if (options.nonEmpty)
+      s"$fname${argtypes.mkString("(", ",", ")")}:${returnType}{\n" + options.map(o => "    " + o._1.mkString(" ") + " -> " + o._2).mkString("\n") + "\n    else -> " + default + "\n}"
+    else
+      s"$fname{\n    " + default + "\n}"
+  }
 }
 
 object IntermediateCounterexampleModel {
@@ -208,7 +250,7 @@ object IntermediateCounterexampleModel {
   }
 
   def isLaterVersion(firstName: String, originalName: String, secondName: String): Boolean = {
-    if (secondName == originalName || secondName == "q@" + originalName || secondName.indexOf("@@") != -1) {
+    if ((secondName == originalName || secondName == "q@" + originalName || secondName.indexOf("@@") != -1) && !"@@.*!".r.findFirstIn(firstName).isDefined) {
       true
     } else if (secondName.indexOf("@") != -1 && firstName.indexOf("@@") == -1 && firstName.indexOf("@") != -1) {
       val firstIndex = Integer.parseInt(firstName.substring(firstName.indexOf("@") + 1))
@@ -330,12 +372,23 @@ object IntermediateCounterexampleModel {
           for ((k, v) <- opValues.asInstanceOf[MapEntry].options) {
             res += (v.toString -> Set())
           }
+        } else if (opValues.isInstanceOf[ConstantEntry] && opValues.asInstanceOf[ConstantEntry].value != "false" && opValues.asInstanceOf[ConstantEntry].value != "true") {
+          res += (opValues.asInstanceOf[ConstantEntry].value -> Set())
         }
       }
       if (opName == "Set#Singleton") {
         if (opValues.isInstanceOf[MapEntry]) {
           for ((k, v) <- opValues.asInstanceOf[MapEntry].options) {
             res += (v.toString -> Set(k(0).toString))
+          }
+        }
+      }
+      if (opName == "Set#Card") {
+        if (opValues.isInstanceOf[MapEntry]) {
+          for ((k, v) <- opValues.asInstanceOf[MapEntry].options) {
+            if (v.toString.startsWith("0")) {
+              res += (k(0).toString -> Set())
+            }
           }
         }
       }
@@ -401,6 +454,113 @@ object IntermediateCounterexampleModel {
           }
         }
         ans += CESet(n, BigInt(s.size), containment, s, typ)
+    }
+    ans
+  }
+
+  // a CE generator for Multisets
+  def detMultisets(model: Model): Set[CEValue] = {
+    var res = Map[String, Map[String, Int]]()
+    for ((opName, opValues) <- model.entries) {
+      if (opName == "MultiSet#Empty") {
+        if (opValues.isInstanceOf[MapEntry]) {
+          for ((k, v) <- opValues.asInstanceOf[MapEntry].options) {
+            res += (v.toString -> Map[String, Int]())
+          }
+        } else if (opValues.isInstanceOf[ConstantEntry] && opValues.asInstanceOf[ConstantEntry].value != "false" && opValues.asInstanceOf[ConstantEntry].value != "true") {
+          res += (opValues.asInstanceOf[ConstantEntry].value -> Map[String, Int]())
+        }
+      }
+      if (opName == "MultiSet#Singleton") {
+        if (opValues.isInstanceOf[MapEntry]) {
+          for ((k, v) <- opValues.asInstanceOf[MapEntry].options) {
+            res += (v.toString -> Map(k(0).toString -> 1))
+          }
+        }
+      }
+      if (opName == "MultiSet#Select") {
+        if (opValues.isInstanceOf[MapEntry]) {
+          for ((k, v) <- opValues.asInstanceOf[MapEntry].options) {
+            if (!k(1).toString.startsWith("T@U!val!") && !v.toString.startsWith("0")) {
+              res += (k(0).toString -> res.getOrElse(k(0).toString, Map.empty).updated(k(1).toString, v.toString.toInt))
+            }
+          }
+        }
+      }
+      if (opName == "MultiSet#Card") {
+        if (opValues.isInstanceOf[MapEntry]) {
+          for ((k, v) <- opValues.asInstanceOf[MapEntry].options) {
+            if (v.toString.startsWith("0")) {
+              res += (k(0).toString -> Map[String, Int]())
+            }
+          }
+        }
+      }
+    }
+    var tempMap = Map[(String, Seq[String]), String]()
+    for ((opName, opValues) <- model.entries) {
+      if (opName == "MultiSet#UnionOne") {
+        if (opValues.isInstanceOf[MapEntry]) {
+          for ((k, v) <- opValues.asInstanceOf[MapEntry].options) {
+            tempMap += ((opName, k.map(x => x.toString)) -> v.toString)
+          }
+        }
+      }
+    }
+    while (!tempMap.isEmpty) {
+      for (((opName, k), v) <- tempMap) {
+        res.get(k(0)) match {
+          case Some(x) =>
+            res += (v -> x.updated(k(1), x.getOrElse(k(1), 0)+1))
+            tempMap -= ((opName, k))
+          case None => //
+        }
+      }
+    }
+    for ((opName, opValues) <- model.entries) {
+      if (opName == "MultiSet#Union" || opName == "MultiSet#Difference" || opName == "MultiSet#Intersection") {
+        if (opValues.isInstanceOf[MapEntry]) {
+          for ((k, v) <- opValues.asInstanceOf[MapEntry].options) {
+            tempMap += ((opName, k.map(x => x.toString)) -> v.toString)
+          }
+        }
+      }
+    }
+    while (!tempMap.isEmpty) {
+      for (((opName, k), v) <- tempMap) {
+        val firstMultiset = res.get(k(0))
+        val secondMultiset = res.get(k(1))
+        if ((firstMultiset != None) && (secondMultiset != None)) {
+          if (opName == "MultiSet#Union") {
+            res += (v -> (firstMultiset.get.keySet ++ secondMultiset.get.keySet).map { key =>
+              (key -> (firstMultiset.get.getOrElse(key, 0) + secondMultiset.get.getOrElse(key, 0)))
+            }.toMap)
+            tempMap -= ((opName, k))
+          } else if (opName == "MultiSet#Intersection") {
+            res += (v -> (firstMultiset.get.keySet & secondMultiset.get.keySet).map { key =>
+              key -> Math.min(firstMultiset.get.get(key).get, secondMultiset.get.get(key).get)
+            }.toMap)
+            tempMap -= ((opName, k))
+          } else if (opName == "MultiSet#Difference") {
+            res += (v -> (firstMultiset.get.map { case (key, count) =>
+              key -> (count - secondMultiset.get.getOrElse(key, 0))
+            }.filter(_._2 > 0) ++ secondMultiset.get.filter { case (key, _) =>
+              !firstMultiset.get.contains(key)
+            }))
+            tempMap -= ((opName, k))
+          }
+        }
+      }
+    }
+    var ans = Set[CEValue]()
+    res.foreach {
+      case (n, s) =>
+        val typ: Option[Type] = detASTTypeFromString(n.replaceAll(".*?<(.*)>.*", "$1")) match {
+          case Some(x) => Some(ast.SetType(x))
+          case None => None
+        }
+        val size = s.values.sum
+        ans += CEMultiset(n, BigInt(size), s, typ)
     }
     ans
   }
@@ -530,12 +690,21 @@ object IntermediateCounterexampleModel {
     for (predName <- program.predicates.map(x => x.name)) {
       val predEntry = model.entries.get(predName).getOrElse(model.entries.find{ case (x, _) => (x.startsWith(predName ++ "_") && !x.contains("@"))}.getOrElse(ConstantEntry("")))
       if (predEntry.isInstanceOf[MapEntry] && !predEntry.asInstanceOf[MapEntry].options.isEmpty) {
-        val (predContent, predId) = predEntry.asInstanceOf[MapEntry].options.head
-        predContentMap += (predId.toString -> predContent.map(x => x.toString))
+        for ((predContent, predId) <- predEntry.asInstanceOf[MapEntry].options) {
+          predContentMap += (predId.toString -> predContent.map(x => x.toString))
+        }
       }
     }
+//    var mwContentMap = Map[String, Seq[String]]()
+//    for (predName <- program.magi.map(x => x.name)) {
+//      val predEntry = model.entries.get(predName).getOrElse(model.entries.find { case (x, _) => (x.startsWith(predName ++ "_") && !x.contains("@")) }.getOrElse(ConstantEntry("")))
+//      if (predEntry.isInstanceOf[MapEntry] && !predEntry.asInstanceOf[MapEntry].options.isEmpty) {
+//        for ((predContent, predId) <- predEntry.asInstanceOf[MapEntry].options) {
+//          predContentMap += (predId.toString -> predContent.map(x => x.toString))
+//        }
+//      }
+//    }
     val permMap = model.entries.get("U_2_real").get.asInstanceOf[MapEntry].options
-    println(permMap)
     var res = Seq[(String, BasicHeap)]()
     for ((labelName, (labelHeap, labelMask)) <- hmLabels) {
       var heapEntrySet = Set[BasicHeapEntry]()
@@ -547,7 +716,7 @@ object IntermediateCounterexampleModel {
       for (ck <- commonKeys) {
         val value = heapMap.get(ck).get
         val perm = maskMap.get(ck).get
-        var tempPerm: Option[Rational] = detHeapEntryPermission(permMap, perm._1)
+        val tempPerm: Option[Rational] = detHeapEntryPermission(permMap, perm._1)
         val typ: HeapEntryType = detHeapType(model, qpMaskSet, ck(1), perm._2)
         if (typ == FieldType || typ == QPFieldType) {
           heapEntrySet += BasicHeapEntry(Seq(ck(0)), Seq(ck(1)), value._1, tempPerm, typ)
@@ -710,20 +879,108 @@ object IntermediateCounterexampleModel {
     }
   }
 
-  // "replaceEntriesModel" choose all the operations for specific type supported in the CE
-  def findAllFuncOper(workingModel: Map[Seq[String], String], program: Program): Map[Seq[String], String] = {
-
-    // define output maps for the operations of sequences, sets,
-    var funOperations = Map[Seq[String], String]()
-
-    // choose the operations corresponding to the types from the model received by boogie
-    for ((k, v) <- workingModel) {
-      if (program.functionsByName.keySet.contains(k(0)) || program.domainFunctionsByName.keySet.contains(k(0))) {
-        funOperations += (k -> v)
-      }
+  /**
+   * extracts domains from a program. only the ones that are used in the program... no generics
+   * it also extracts all instances (translates the generics to concrete values)
+   */
+  def getAllDomains(model: Model, program: ast.Program): Seq[BasicDomainEntry] = {
+//    var domains = Seq[ast.Domain]()
+//    var concreteDomains = Seq[(String, Map[ast.TypeVar, Type])]()
+//    for (el <- program) {
+//      el match {
+//        case d: ast.Domain => domains +:= d
+//        case ast.DomainType(name, map) =>
+//          if (!map.values.toSeq.exists(x => x.isInstanceOf[ast.TypeVar])) {
+//            concreteDomains +:= (name, map)
+//          }
+//        case ast.DomainFuncApp(name, _, map) =>
+//          if (!map.values.toSeq.exists(x => x.isInstanceOf[ast.TypeVar])) {
+//            concreteDomains +:= (name, map)
+//          }
+//        case _ => //
+//      }
+//    }
+//    val doms: Seq[(ast.Domain, Map[ast.TypeVar, Type])] = domains.flatMap(x =>
+//      if (x.typVars == Nil) {
+//        Seq((x, Map.empty[ast.TypeVar, ast.Type]))
+//      } else {
+//        concreteDomains.filter(_._1 == x.name).map(y => (x, y._2))
+//      })
+//    println(concreteDomains.toString())
+//    println(doms.toString())
+//    var domainEntries = Seq[BasicDomainEntry]()
+//    for ((dom, typeMap) <- doms) {
+//      val types = try {
+//        dom.typVars.map(typeMap)
+//      } catch {
+//        case _: Throwable => Seq()
+//      }
+//      val translatedFunctions = dom.functions.map(y => detFunction(model, y, typeMap, program))
+//      BasicDomainEntry(dom.name, types, translatedFunctions)
+//    }
+//    domainEntries
+    val domains = program.collect {
+      case a: ast.Domain => a
     }
+    val concreteDoms = program.collect { // find all definitive type instances
+      case ast.DomainType(n, map) => (n, map)
+      case d: ast.DomainFuncApp => (d.domainName, d.typVarMap) // sometimes we use a function without having an actual member of this...
 
-    funOperations
+    }.filterNot(x => containsTypeVar(x._2.values.toSeq)).toSet // make sure we have all possible mappings without duplicates
+
+    val doms = domains.flatMap(x => if (x.typVars == Nil) Seq((x, Map.empty[ast.TypeVar, ast.Type])) else concreteDoms.filter(_._1 == x.name).map(y => (x, y._2))) // changing the typevars to the actual ones
+
+    doms.map(x => {
+      val types = try {
+        x._1.typVars.map(x._2)
+      } catch {
+        case _: Throwable => Seq()
+      }
+      val translatedFunctions = x._1.functions.map(y => detFunction(model, y, x._2, program, false))
+      BasicDomainEntry(x._1.name, types, translatedFunctions)
+    }).toSeq
+  }
+
+  def containsTypeVar(s: Seq[ast.Type]): Boolean = s.exists(x => x.isInstanceOf[ast.TypeVar])
+
+  // extract all non domain internal functions
+  def getAllFunctions(model: Model, program: ast.Program): Seq[BasicFunction] = {
+    val funcs = program.collect {
+      case f: ast.Function => f
+    }
+    funcs.map(x => detFunction(model, x, Map.empty, program, true)).toSeq
+  }
+
+  /**
+   * extracts the function instances by searching for the most likely match translating the values in the internal rep
+   *
+   * @param model
+   * @param func   the function to translate
+   * @param genmap map of generic types to concrete types
+   * @return
+   */
+  def detFunction(model: Model, func: ast.FuncLike, genmap: Map[ast.TypeVar, ast.Type], program: ast.Program, hd: Boolean): BasicFunction = {
+    val fname = func.name
+    val resTyp: ast.Type = func.typ
+    val argTyp: Seq[ast.Type] = func.formalArgs.map(x => x.typ)
+    model.entries.get(fname) match {
+      case Some(MapEntry(m, els)) =>
+        var options = Map[Seq[String], String]()
+        if (hd)  {
+          for ((k, v) <- m) {
+            options += (k.map(x => x.toString) -> v.toString)
+          }
+        } else {
+          for ((k, v) <- m) {
+            options += (k.tail.map(x => x.toString) -> v.toString)
+          }
+        }
+        BasicFunction(fname, argTyp, resTyp, options, els.toString)
+      case Some(ConstantEntry(t)) => BasicFunction(fname, argTyp, resTyp, Map.empty, t)
+      case Some(ApplicationEntry(n, args)) => BasicFunction(fname, argTyp, resTyp, Map.empty, ApplicationEntry(n, args).toString)
+      case Some(x) => BasicFunction(fname, argTyp, resTyp, Map.empty, x.toString)
+      case None => BasicFunction(fname, argTyp, resTyp, Map.empty, "#undefined")
+    }
   }
 
 }
@@ -792,7 +1049,7 @@ object CounterexampleGenerator {
                 }
               }
               if (!found) {
-                ans +:= (fi, FieldFinalEntry(bhe.reference(0), fi.name, CEVariable("#undefined", ConstantEntry(bhe.valueID), Some(fi.typ)), bhe.perm, fi.typ))
+                ans +:= (fi, FieldFinalEntry(bhe.reference(0), fi.name, CEVariable("FieldAccessVariable", ConstantEntry(bhe.valueID), Some(fi.typ)), bhe.perm, fi.typ))
               }
             case None => println(s"Could not find a field node for: ${bhe.toString}")
           }
@@ -803,7 +1060,6 @@ object CounterexampleGenerator {
               ans +:= (pr, PredFinalEntry(pr.name, bhe.field, bhe.perm))
             case None => println(s"Could not find a predicate node for: ${bhe.toString}")
           }
-          //TODO: Implement MW and recursive fields
         case _ => println("This type of heap entry could not be matched correctly!")
       }
 
