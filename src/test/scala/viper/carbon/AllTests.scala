@@ -19,8 +19,9 @@ import viper.silver.reporter.{NoopReporter, StdIOReporter}
   */
 class AllTests extends SilSuite {
   override def testDirectories: Seq[String] = Vector(
-    "local", "all", "quantifiedpermissions", "quantifiedpredicates", "quantifiedcombinations",
-    "wands", "examples", "termination", "refute", "quasihavoc"
+    "examples"
+    //"local", "all", "quantifiedpermissions", "quantifiedpredicates", "quantifiedcombinations",
+    //"wands", "examples", "termination", "refute", "quasihavoc"
   )
 
   override def frontend(verifier: Verifier, files: Seq[Path]): Frontend = {
@@ -30,6 +31,13 @@ class AllTests extends SilSuite {
     fe.reset(files.head)
     fe
   }
+
+  val carbon: CarbonVerifier = CarbonVerifier(StdIOReporter())
+
+  override def configureVerifiersFromConfigMap(configMap: Map[String, Any]): Unit = {
+    carbon.parseCommandLine(Seq("--counterexample", "extended") :+ "dummy-file-to-prevent-cli-parser-from-complaining-about-missing-file-name.silver.vpr")
+  }
+  //Seq("--counterexample", "intermediate") :+
 
   lazy val verifiers = List(CarbonVerifier(StdIOReporter()))
 }

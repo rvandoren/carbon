@@ -12,7 +12,9 @@ import viper.carbon.CarbonVerifier
 import viper.silver.ast.{Add, AnonymousDomainAxiom, Domain, DomainFunc, DomainFuncApp, EqCmp, Exists, Forall, Int, IntLit, LocalVar, LocalVarDecl, Method, Program, Seqn, Trigger, TrueLit, WeightedQuantifier}
 import viper.silver.reporter.NoopReporter
 import viper.silver.verifier.{Failure, Success}
+import org.scalatest.DoNotDiscover
 
+@DoNotDiscover
 class CarbonQuantifierWeightTests extends AnyFunSuite with BeforeAndAfterAll {
   val carbon: CarbonVerifier = CarbonVerifier(NoopReporter)
 

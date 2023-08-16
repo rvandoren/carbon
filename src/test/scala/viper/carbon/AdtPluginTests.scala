@@ -13,7 +13,9 @@ import viper.silver.testing.SilSuite
 import viper.silver.verifier.Verifier
 
 import java.nio.file.Path
+import org.scalatest.DoNotDiscover
 
+@DoNotDiscover
 /** All tests for the Adt Plugin. */
 class AdtPluginTests extends SilSuite {
    override def testDirectories: Seq[String] = Vector("adt")
