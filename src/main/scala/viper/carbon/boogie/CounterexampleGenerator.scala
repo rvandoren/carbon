@@ -10,28 +10,28 @@ import viper.silver.verifier.{AbstractError, ApplicationEntry, ConstantEntry, Ma
 import viper.silver.ast.{Declaration, MagicWandStructure, Program, Type}
 
 /**
- * Transforms a counterexample returned by Boogie back to a Viper counterexample.
+ * Transforms a counterexample returned by Boogie back to a Viper counterexample. The programmer can choose between an
+ * "intermediate" CE or an "extended" CE.
+ */
+
+/**
+ * CounterexampleGenerator class used for generating an "extended" CE.
  */
 case class CounterexampleGenerator(e: AbstractError, names: Map[String, Map[String, String]], program: Program, wandNames: Option[Map[MagicWandStructure.MagicWandStructure, Func]]) extends Counterexample {
   val ve = e.asInstanceOf[VerificationError]
   val errorMethod = ErrorMemberMapping.mapping.get(ve.methodIdentifier).get
   val imCE = IntermediateCounterexampleModel(ve, errorMethod, names, program, wandNames)
   val model = imCE.originalEntries
+  //println(model)
 
   val (ceStore, refOcc) = CounterexampleGenerator.detStore(program.methodsByName.get(errorMethod.name).get.transitiveScopedDecls, imCE.basicVariables, imCE.allCollections)
   val nameTranslationMap = CounterexampleGenerator.detTranslationMap(ceStore, refOcc)
-  var ceHeaps = Seq[(String, HeapCounterexample)]()
-  imCE.allBasicHeaps.foreach { case (n, h) =>
-    if (n == "return") {
-      ceHeaps +:= (("current", CounterexampleGenerator.detHeap(imCE.workingModel, h, program, imCE.allCollections, nameTranslationMap, imCE.originalEntries)))
-    } else {
-      ceHeaps +:= ((n, CounterexampleGenerator.detHeap(imCE.workingModel, h, program, imCE.allCollections, nameTranslationMap, imCE.originalEntries)))
-    }}
+  var ceHeaps = imCE.allBasicHeaps.map(bh => (bh._1, CounterexampleGenerator.detHeap(imCE.workingModel, bh._2, program, imCE.allCollections, nameTranslationMap, imCE.originalEntries))).reverse
 
   val domainsAndFunctions = CounterexampleGenerator.detTranslatedDomains(imCE.DomainEntries, nameTranslationMap) ++ CounterexampleGenerator.detTranslatedFunctions(imCE.nonDomainFunctions, nameTranslationMap)
 
   override def toString: String = {
-    var finalString = "      Final Counterexample: \n"
+    var finalString = "      Extended Counterexample: \n"
     finalString += "   Store: \n"
     if (!ceStore.storeEntries.isEmpty)
       finalString += ceStore.storeEntries.map(x => x.toString).mkString("", "\n", "\n")
@@ -45,6 +45,9 @@ case class CounterexampleGenerator(e: AbstractError, names: Map[String, Map[Stri
   }
 }
 
+/**
+ * CounterexampleGenerator class used for generating an "interemediate" CE.
+ */
 case class IntermediateCounterexampleModel(ve: VerificationError, errorMethod: Member, names: Map[String, Map[String, String]], program: Program, wandNames: Option[Map[MagicWandStructure.MagicWandStructure, Func]]) extends Counterexample {
   val originalEntries = ve.failureContexts(0).counterExample.get.model
   val model = originalEntries
@@ -59,7 +62,7 @@ case class IntermediateCounterexampleModel(ve: VerificationError, errorMethod: M
 
   val workingModel = IntermediateCounterexampleModel.buildNewModel(originalEntries.entries)
   val (hmLabels, hmStates) = IntermediateCounterexampleModel.oldAndReturnHeapMask(workingModel, otherDeclarations)
-  val allBasicHeaps = IntermediateCounterexampleModel.detHeaps(workingModel, hmStates, originalEntries, hmLabels, program)
+  val allBasicHeaps = IntermediateCounterexampleModel.detHeaps(workingModel, hmStates, originalEntries, hmLabels, program).map{case (n, bh) => if (n == "return") ("current", bh) else (n, bh)}
 
   val DomainEntries = IntermediateCounterexampleModel.getAllDomains(originalEntries, program)
   val nonDomainFunctions = IntermediateCounterexampleModel.getAllFunctions(originalEntries, program, hmStates)
@@ -84,7 +87,9 @@ case class IntermediateCounterexampleModel(ve: VerificationError, errorMethod: M
 }
 
 object IntermediateCounterexampleModel {
-
+  /**
+   * Determines the local variables and their value.
+   */
   def detCEvariables(originalEntries: Map[String, ModelEntry], namesInMember: Map[String, String], variables: Seq[Declaration]): (Seq[CEVariable], Seq[Declaration]) = {
     var res = Seq[CEVariable]()
     var otherDeclarations = Seq[Declaration]()
@@ -114,6 +119,9 @@ object IntermediateCounterexampleModel {
     (res, otherDeclarations)
   }
 
+  /**
+   * Chooses the latest instance of a variable in the counterexample model received from the SMT solver.
+   */
   def transformModelEntries(originalEntries: Map[String, ModelEntry], namesInMember: Map[String, String]): mutable.Map[String, ModelEntry] = {
     val newEntries = mutable.HashMap[String, ModelEntry]()
     val currentEntryForName = mutable.HashMap[String, String]()
@@ -153,7 +161,9 @@ object IntermediateCounterexampleModel {
     }
   }
 
-  // a CE generator for sequences
+  /**
+   * Generates the sequences of the CE.
+   */
   def detSequences(model: Model): Set[CEValue] = {
     var res = Map[String, Seq[String]]()
     var tempMap = Map[(String, Seq[String]), String]()
@@ -257,7 +267,9 @@ object IntermediateCounterexampleModel {
     ans
   }
 
-  // a CE generator for sets
+  /**
+   * Generates the sets of the CE.
+   */
   def detSets(model: Model): Set[CEValue] = {
     var res = Map[String, Set[String]]()
     for ((opName, opValues) <- model.entries) {
@@ -386,7 +398,9 @@ object IntermediateCounterexampleModel {
     ans
   }
 
-  // a CE generator for Multisets
+  /**
+   * Generates the multisets of the CE.
+   */
   def detMultisets(model: Model): Set[CEValue] = {
     var res = Map[String, Map[String, Int]]()
     for ((opName, opValues) <- model.entries) {
@@ -503,7 +517,9 @@ object IntermediateCounterexampleModel {
     }
   }
 
-  // "buildNewModel" builds takes the CE model from Boogie and transforms it into a model which makes it easier to determine the individual values
+  /**
+   * Takes the counterexample model received from the SMT solver and restructures it.
+   */
   def buildNewModel(originalEntries: Map[String, ModelEntry]): Map[Seq[String], String] = {
     var newEntriesMapping = Map[Seq[String], String]()
     for ((key, value) <- originalEntries) {
@@ -530,7 +546,10 @@ object IntermediateCounterexampleModel {
     newEntriesMapping
   }
 
-  // determine the identifier for the different Heap and Mask instances
+  /**
+   * Gather all the heap and mask states from the model. Then, combine them into heap instances (=> mask state + heap state)
+   * and order them.
+   */
   def oldAndReturnHeapMask(workingModel: Map[Seq[String], String], labels: Seq[Declaration]): (Map[String, (String, String)], List[(String, String, String, String)]) = {
     var heapInstances = Set[(String, String)]()
     var maskInstances = Set[(String, String)]()
@@ -601,6 +620,14 @@ object IntermediateCounterexampleModel {
     (labelsHeapMask, filteredList)
   }
 
+  /**
+   * Determines all the heap resources by iterating through the heap instances: Check all the "MapType0Select" function
+   * for the heap state of the heap instance and check the "MapType0Select" function for the mask state of the heap
+   * instance. Then gather all the heap resources that occur in both functions for a specific heap instance.
+   * @param MapType0Select Mappings from a heap state, a reference and a field to a value.
+   * @param MapType0Select Mappings from a mask state, a reference and a field to a permission.
+   * The fields in these mappings can also be identifiers for a predicate or a magic wand.
+   */
   def detHeaps(opMapping: Map[Seq[String], String], hmStates: List[(String, String, String, String)], model: Model, hmLabels: Map[String, (String, String)], program: Program): Seq[(String, BasicHeap)] = {
     val predByName = program.predicatesByName
     var heapOp = Map[Seq[String], String]()
@@ -739,6 +766,9 @@ object IntermediateCounterexampleModel {
     res
   }
 
+  /**
+   * Evaluate the snapshot of a predicate.
+   */
   def evalInsidePredicate(insId: String, predId: String, predicateFinder: Map[String, String], predByName: scala.collection.immutable.Map[String, Predicate], model: Model): Map[ast.Exp, ModelEntry] = {
     val frameAssign = model.entries.get("FrameFragment")
     val frameCombine = model.entries.get("CombineFrames")
@@ -769,6 +799,9 @@ object IntermediateCounterexampleModel {
     ans
   }
 
+  /**
+   * Compare the snapshot of a predicate to its actual body (accessed through its ast node).
+   */
   def evalBody(exp: ast.Exp, value: ModelEntry, lookup: Map[ast.Exp, ModelEntry]): (ast.Exp, ModelEntry) = {
     exp match {
       case ast.FieldAccessPredicate(predAcc, _) => (predAcc, value)
@@ -825,6 +858,9 @@ object IntermediateCounterexampleModel {
     }
   }
 
+  /**
+   * Determine the type of a heap resource.
+   */
   def detHeapType(model: Model, qpMaskSet: Set[String], id: String, maskId: String): HeapEntryType = {
     var predIdSet = Set[String]()
     if (model.entries.get("IsPredicateField").get.isInstanceOf[MapEntry]) {
@@ -897,8 +933,8 @@ object IntermediateCounterexampleModel {
   }
 
   /**
-   * extracts domains from a program. only the ones that are used in the program... no generics
-   * it also extracts all instances (translates the generics to concrete values)
+   * Extracts domains from a program. Only the ones that are used in the program... no generics.
+   * It also extracts all instances (translates the generics to concrete values).
    */
   def getAllDomains(model: Model, program: ast.Program): Seq[BasicDomainEntry] = {
     val domains = program.collect {
@@ -922,7 +958,9 @@ object IntermediateCounterexampleModel {
 
   def containsTypeVar(s: Seq[ast.Type]): Boolean = s.exists(x => x.isInstanceOf[ast.TypeVar])
 
-  // extract all non domain internal functions
+  /**
+   * Extract all the functions occuring inside of a domain.
+   */
   def getAllFunctions(model: Model, program: ast.Program, heapInstances: Seq[(String, String, String, String)]): Seq[BasicFunction] = {
     val funcs = program.collect {
       case f: ast.Function => f
@@ -931,12 +969,7 @@ object IntermediateCounterexampleModel {
   }
 
   /**
-   * extracts the function instances by searching for the most likely match translating the values in the internal rep
-   *
-   * @param model
-   * @param func   the function to translate
-   * @param genmap map of generic types to concrete types
-   * @return
+   * Determine all the inputs and outputs combinations of a function occruing the counterexample model.
    */
   def detFunction(model: Model, func: ast.FuncLike, genmap: scala.collection.immutable.Map[ast.TypeVar, ast.Type], heapInst: Seq[(String, String, String, String)], program: ast.Program, hd: Boolean): BasicFunction = {
     val fname = func.name
@@ -971,6 +1004,9 @@ object IntermediateCounterexampleModel {
 }
 
 object CounterexampleGenerator {
+  /**
+   * Combine a local variable with its ast node.
+   */
   def detStore(store: Seq[Declaration], variables: Seq[CEVariable], collections: Set[CEValue]): (StoreCounterexample, Map[String, (String, Int)]) = {
     var refOccurences = Map[String, (String, Int)]()
     var ans = Seq[StoreEntry]()
@@ -1006,6 +1042,9 @@ object CounterexampleGenerator {
     (StoreCounterexample(ans), refOccurences)
   }
 
+  /**
+   * Match the collection type for the "extended" CE.
+   */
   def detTranslationMap(store: StoreCounterexample, fields: Map[String, (String, Int)]): Map[String, String] = {
     var namesTranslation = Map[String, String]()
     for (ent <- store.storeEntries) {
@@ -1024,6 +1063,9 @@ object CounterexampleGenerator {
     namesTranslation
   }
 
+  /**
+   * Match heap resources to their ast node and translate all identifiers (for fields and references)
+   */
   def detHeap(opMapping: Map[Seq[String], String], basicHeap: BasicHeap, program: Program, collections: Set[CEValue], translNames: Map[String, String], model: Model): HeapCounterexample = {
     // choosing all the needed values from the Boogie Model
     var usedIdent = Map[String, Member]()
@@ -1044,28 +1086,30 @@ object CounterexampleGenerator {
     for (bhe <- basicHeap.basicHeapEntries) {
       bhe.het match {
         case FieldType | QPFieldType=>
-          usedIdent.get(bhe.field(0)) match {
-            case Some(f) =>
-              val fi = f.asInstanceOf[Field]
-              var found = false
-              for (coll <- collections) {
-                if (bhe.valueID == coll.id) {
-                  if (translNames.get(bhe.reference.head).isDefined) {
-                    ans +:= (fi, FieldFinalEntry(translNames.get(bhe.reference.head).get, fi.name, coll, bhe.perm, fi.typ, bhe.het))
-                  } else {
-                    ans +:= (fi, FieldFinalEntry(bhe.reference.head, fi.name, coll, bhe.perm, fi.typ, bhe.het))
+          if (!bhe.perm.isDefined || !(bhe.perm.get == Rational.zero)) {
+            usedIdent.get(bhe.field(0)) match {
+              case Some(f) =>
+                val fi = f.asInstanceOf[Field]
+                var found = false
+                for (coll <- collections) {
+                  if (bhe.valueID == coll.id) {
+                    if (translNames.get(bhe.reference.head).isDefined) {
+                      ans +:= (fi, FieldFinalEntry(translNames.get(bhe.reference.head).get, fi.name, coll, bhe.perm, fi.typ, bhe.het))
+                    } else {
+                      ans +:= (fi, FieldFinalEntry(bhe.reference.head, fi.name, coll, bhe.perm, fi.typ, bhe.het))
+                    }
+                    found = true
                   }
-                  found = true
                 }
-              }
-              if (!found) {
-                if (translNames.get(bhe.reference.head).isDefined) {
-                  ans +:= (fi, FieldFinalEntry(translNames.get(bhe.reference.head).get, fi.name, CEVariable("#undefined", ConstantEntry(bhe.valueID), Some(fi.typ)), bhe.perm, fi.typ, bhe.het))
-                } else {
-                  ans +:= (fi, FieldFinalEntry(bhe.reference.head, fi.name, CEVariable("#undefined", ConstantEntry(bhe.valueID), Some(fi.typ)), bhe.perm, fi.typ, bhe.het))
+                if (!found) {
+                  if (translNames.get(bhe.reference.head).isDefined) {
+                    ans +:= (fi, FieldFinalEntry(translNames.get(bhe.reference.head).get, fi.name, CEVariable("#undefined", ConstantEntry(bhe.valueID), Some(fi.typ)), bhe.perm, fi.typ, bhe.het))
+                  } else {
+                    ans +:= (fi, FieldFinalEntry(bhe.reference.head, fi.name, CEVariable("#undefined", ConstantEntry(bhe.valueID), Some(fi.typ)), bhe.perm, fi.typ, bhe.het))
+                  }
                 }
-              }
-            case None => println(s"Could not find a field node for: ${bhe.toString}")
+              case None => println(s"Could not find a field node for: ${bhe.toString}")
+            }
           }
         case PredicateType | QPPredicateType =>
           usedIdent.get(bhe.reference(1)) match {
@@ -1081,17 +1125,17 @@ object CounterexampleGenerator {
             case None => println(s"Could not find a predicate node for: ${bhe.toString}")
           }
         case MagicWandType | QPMagicWandType =>
-          val translatedArgs = bhe.field
-            .filter(s => s.startsWith("T@U!val!"))
-            .map { name => (name -> translNames.getOrElse(name, name))}
-            .toMap
+          val translatedArgs = bhe.field.map(x => translNames.getOrElse(x, x))
           for ((mw, idx) <- program.magicWandStructures.zipWithIndex) {
+            val mwStructure = mw.structure(program, true)
+            val replacements: Iterable[(ast.Node, ast.Node)] = mwStructure.subexpressionsToEvaluate(program).zip(translatedArgs).map(e => e._1 -> ast.LocalVar(e._2, e._1.typ)())
+            val repl: scala.collection.immutable.Map[ast.Node, ast.Node] = scala.collection.immutable.Map.from(replacements)
+            val transformed = mwStructure.replace(repl)
             if (idx == 0) {
               if (model.entries.get("wand").isDefined && model.entries.get("wand").get.isInstanceOf[MapEntry]) {
                 for (s <-  model.entries.get("wand").get.asInstanceOf[MapEntry].options) {
                   if (s._2.toString == bhe.reference(1)) {
-                    val temp = (mw.res(program), WandFinalEntry("wand", mw.left, mw.right, translatedArgs, bhe.perm, bhe.het))
-                    ans +:= temp
+                    ans +:= (mw.res(program), WandFinalEntry("wand", transformed.left, transformed.right, scala.collection.immutable.Map[String, String](), bhe.perm, bhe.het))
                   }
                 }
               }
@@ -1100,7 +1144,7 @@ object CounterexampleGenerator {
               if (model.entries.get(wandName).isDefined && model.entries.get(wandName).get.isInstanceOf[MapEntry]) {
                 for (s <- model.entries.get(wandName).get.asInstanceOf[MapEntry].options) {
                   if (s._2.toString == bhe.reference(1)) {
-                    ans +:= (mw, WandFinalEntry(wandName, mw.left, mw.right, translatedArgs, bhe.perm, bhe.het))
+                    ans +:= (mw, WandFinalEntry(wandName, transformed.left, transformed.right, scala.collection.immutable.Map[String, String](), bhe.perm, bhe.het))
                   }
                 }
               }

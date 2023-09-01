@@ -64,7 +64,6 @@ import viper.silver.verifier.Verifier
  *   - CARBONTESTS_REPETITIONS = n // Optional, defaults to 1. If less then 3, no "trimming" will happen.
  *   - CARBONTESTS_CSV = path/to/file.csv // Optional. If provided, mean & stddev are written to CSV file.
  */
-@DoNotDiscover
 class PortableCarbonTests extends SilSuite with StatisticalTestSuite {
   /** Following a hyphenation-based naming scheme is important for handling project-specific annotations.
    * See comment for [[viper.silver.testing.TestAnnotations.projectNameMatches()]].
@@ -77,7 +76,18 @@ class PortableCarbonTests extends SilSuite with StatisticalTestSuite {
   override val csvFilePropertyName = "CARBONTESTS_CSV"
 
   val reporter = NoopReporter
+
   override def verifier: CarbonVerifier = CarbonVerifier(reporter)
+
+  val commandLineArguments: Seq[String] = Seq(
+    "--disableCatchingExceptions", "--counterexample", "extended",
+    "--timeout", System.getProperty("180") /* timeout in seconds */
+  ) ++ (if (false) Seq("--proverRandomizeSeeds") else Seq.empty)
+  //"--counterexample", "extended",
+
+  override def configureVerifiersFromConfigMap(configMap: Map[String, Any]): Unit = {
+    verifier.parseCommandLine(commandLineArguments :+ "dummy-file-to-prevent-cli-parser-from-complaining-about-missing-file-name.silver.vpr")
+  }
 
   override def frontend(verifier: Verifier, files: Seq[Path]): Frontend = {
     require(files.length == 1, "tests should consist of exactly one file")
